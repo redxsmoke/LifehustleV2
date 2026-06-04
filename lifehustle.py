@@ -9,52 +9,48 @@ from db.connection import init_db
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))  
+GUILD_ID = int(os.getenv("GUILD_ID"))
 
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        await init_db()
+
+        await self.load_extension("cogs.general")
+        await self.load_extension("cogs.economy")
+        await self.load_extension("cogs.progression")
+        await self.load_extension("cogs.gambling")
+
+        guild = discord.Object(id=GUILD_ID)
+
+        # Keep your cleanup (safe)
+        self.tree.clear_commands(guild=guild)
+
+        # Sync commands
+        await self.tree.sync()
+
+        # REAL DEBUG OUTPUT (what actually exists)
+        print("Commands currently loaded:")
+        for cmd in self.tree.get_commands():
+            print(f"- {cmd.name}")
+
+
+bot = MyBot()
 
 
 @bot.event
 async def on_ready():
-    if getattr(bot, "synced_once", False):
-        return
-
-    bot.synced_once = True
-
     print(f"Logged in as {bot.user}")
-
-    try:
-        guild = discord.Object(id=GUILD_ID)
-
-        # FORCE TREE DISCOVERY AFTER COG LOAD
-        await bot.tree.sync(guild=guild)
-
-        print("Synced commands to guild")
-
-    except Exception as e:
-        print(f"Sync error: {e}")
-
-async def load_cogs():
-    try:
-        await bot.load_extension("cogs.general")
-        await bot.load_extension("cogs.economy")
-        await bot.load_extension("cogs.progression")
-        await bot.load_extension("cogs.gambling")
-
-        print("All cogs loaded successfully")
-
-    except Exception as e:
-        print(f"Cog loading error: {e}")
 
 
 async def main():
-    async with bot:
-        await init_db()
-        await load_cogs()
-        await bot.start(TOKEN)
+    await bot.start(TOKEN)
 
 
 asyncio.run(main())

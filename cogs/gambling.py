@@ -8,6 +8,13 @@ from db.users import upsert_user
 
 
 # =========================================================
+# 💰 MONEY FORMAT (CENTS → DISPLAY)
+# =========================================================
+def money(cents: int) -> str:
+    return f"${cents / 100:,.2f}"
+
+
+# =========================================================
 # 🎮 SCRATCH VIEW
 # =========================================================
 class ScratchView(discord.ui.View):
@@ -19,7 +26,6 @@ class ScratchView(discord.ui.View):
         self.winning_numbers = winning_numbers
         self.ticket_cost = ticket_cost
         self.pool = pool
-
         self.revealed = revealed or set()
 
         self.build_buttons()
@@ -42,70 +48,39 @@ class ScratchView(discord.ui.View):
             button.callback = callback
             self.add_item(button)
 
-    # =========================================================
-    # FUNNY RESULT MESSAGES
-    # =========================================================
     def get_result_message(self, matches, payout):
         if matches == 0:
-            return "💀 You got NOTHING. The universe watched and laughed."
+            return "💀 You got NOTHING. The universe laughed at you."
 
         elif matches == 1:
-            return (
-                f"🪙 You hit 1 number and won ${payout:,}. "
-                f"Don't spend it all in one place."
-            )
+            return f"🪙 1 match. You won {money(payout)}. Barely profitable behavior."
 
         elif matches == 2:
-            return (
-                f"🔥 Two matches! Somebody call the IRS. "
-                f"You just won ${payout:,}."
-            )
+            return f"🔥 Two matches! {money(payout)}. You're dangerously close to competence."
 
         else:
-            return (
-                f"🎰 JACKPOT! THREE MATCHES! "
-                f"${payout:,} richer. Absolutely disgusting."
-            )
+            return f"🎰 JACKPOT! {money(payout)}. This is statistically offensive."
 
-    # =========================================================
-    # CLICK HANDLER
-    # =========================================================
     async def handle_click(self, interaction: discord.Interaction, index: int):
         if interaction.user.id != self.user_id:
-            return await interaction.response.send_message(
-                "Not your ticket.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("Not your ticket.", ephemeral=True)
 
         if index in self.revealed:
-            return await interaction.response.send_message(
-                "Already scratched.",
-                ephemeral=True
-            )
+            return await interaction.response.send_message("Already scratched.", ephemeral=True)
 
         self.revealed.add(index)
-
         self.build_buttons()
 
         embed = discord.Embed(
             title="🎟 Scratch-Off Ticket",
-            description=(
-                f"🏆 Winning Numbers: "
-                f"{', '.join(map(str, self.winning_numbers))}"
-            )
+            description=f"🏆 Winning Numbers: {', '.join(map(str, self.winning_numbers))}"
         )
 
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self
-        )
+        await interaction.response.edit_message(embed=embed, view=self)
 
         if len(self.revealed) == 9:
             await self.finish_game(interaction)
 
-    # =========================================================
-    # PAYOUTS
-    # =========================================================
     def calculate_payout(self, matches):
         if matches == 1:
             return self.ticket_cost * random.choice([1, 2, 3, 4, 5])
@@ -118,22 +93,17 @@ class ScratchView(discord.ui.View):
 
         return 0
 
-    # =========================================================
-    # FINISH GAME
-    # =========================================================
     async def finish_game(self, interaction: discord.Interaction):
         matches = len(set(self.winning_numbers) & set(self.numbers))
-
         payout = self.calculate_payout(matches)
 
-        if payout > 0:
-            async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
 
+            if payout > 0:
                 await conn.execute(
                     """
                     UPDATE users
-                    SET checking_account_balance =
-                        checking_account_balance + $1
+                    SET checking_account_balance = checking_account_balance + $1
                     WHERE discord_id = $2
                     """,
                     payout,
@@ -153,11 +123,9 @@ class ScratchView(discord.ui.View):
         self.revealed = set(range(9))
         self.build_buttons()
 
-        result_message = self.get_result_message(matches, payout)
-
         embed = discord.Embed(
             title="🎟 Scratch Complete",
-            description=result_message
+            description=self.get_result_message(matches, payout)
         )
 
         embed.add_field(
@@ -180,14 +148,11 @@ class ScratchView(discord.ui.View):
 
         embed.add_field(
             name="💰 Payout",
-            value=f"${payout:,}",
+            value=money(payout),
             inline=True
         )
 
-        await interaction.message.edit(
-            embed=embed,
-            view=self
-        )
+        await interaction.message.edit(embed=embed, view=self)
 
 
 # =========================================================
@@ -197,49 +162,28 @@ class Gambling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(
-        name="scratchoff",
-        description="Buy a scratch-off ticket"
-    )
-    @app_commands.choices(
-        amount=[
-            app_commands.Choice(name="$10", value=10),
-            app_commands.Choice(name="$100", value=100),
-            app_commands.Choice(name="$1,000", value=1000),
-            app_commands.Choice(name="$10,000", value=10000),
-        ]
-    )
-    async def scratchoff(
-        self,
-        interaction: discord.Interaction,
-        amount: int
-    ):
-        ticket_cost = amount
+    @app_commands.command(name="scratchoff", description="Buy a scratch-off ticket")
+    @app_commands.choices(amount=[
+        app_commands.Choice(name="$10", value=10),
+        app_commands.Choice(name="$100", value=100),
+        app_commands.Choice(name="$1,000", value=1000),
+        app_commands.Choice(name="$10,000", value=10000),
+    ])
+    async def scratchoff(self, interaction: discord.Interaction, amount: int):
+
+        ticket_cost = amount * 100  # cents
 
         pool = get_pool()
 
         async with pool.acquire() as conn:
 
-            await upsert_user(
-                conn,
-                interaction.user.id,
-                str(interaction.user)
-            )
+            await upsert_user(conn, interaction.user.id, str(interaction.user))
 
             await conn.execute(
                 """
-                INSERT INTO user_scratchoff
-                (
-                    discord_id,
-                    total_winnings
-                )
-                VALUES
-                (
-                    $1,
-                    0
-                )
-                ON CONFLICT (discord_id)
-                DO NOTHING
+                INSERT INTO user_scratchoff (discord_id, total_winnings)
+                VALUES ($1, 0)
+                ON CONFLICT (discord_id) DO NOTHING
                 """,
                 interaction.user.id
             )
@@ -253,28 +197,45 @@ class Gambling(commands.Cog):
                 interaction.user.id
             )
 
-            balance = user["checking_account_balance"]
+            balance = user["checking_account_balance"] or 0
 
             if balance < ticket_cost:
                 return await interaction.response.send_message(
-                    f"💸 You tried to buy a ${ticket_cost:,} ticket "
-                    f"with ${balance:,}. That's not gambling. "
-                    f"That's a cry for help."
+                    embed=discord.Embed(
+                        title="💸 Insufficient Funds",
+                        description=f"You need {money(ticket_cost)} but only have {money(balance)}.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
                 )
+
+            new_balance = balance - ticket_cost
 
             await conn.execute(
                 """
                 UPDATE users
-                SET checking_account_balance =
-                    checking_account_balance - $1
+                SET checking_account_balance = $1
                 WHERE discord_id = $2
                 """,
-                ticket_cost,
+                new_balance,
                 interaction.user.id
             )
 
         # =====================================================
-        # WEIGHTED ODDS
+        # PURCHASE EMBED (NEW)
+        # =====================================================
+
+        purchase_embed = discord.Embed(
+            title="🎟 Ticket Purchased",
+            color=discord.Color.green()
+        )
+
+        purchase_embed.add_field(name="💰 Old Balance", value=money(balance), inline=True)
+        purchase_embed.add_field(name="🎫 Cost", value=money(ticket_cost), inline=True)
+        purchase_embed.add_field(name="🏦 New Balance", value=money(new_balance), inline=True)
+
+        # =====================================================
+        # ODDS
         # =====================================================
 
         roll = random.random()
@@ -293,24 +254,11 @@ class Gambling(commands.Cog):
         ticket_numbers = []
 
         if target_matches > 0:
-            matched = random.sample(
-                winning_numbers,
-                target_matches
-            )
+            ticket_numbers.extend(random.sample(winning_numbers, target_matches))
 
-            ticket_numbers.extend(matched)
+        non_winning = [n for n in range(1, 37) if n not in winning_numbers]
 
-        non_winning_numbers = [
-            n for n in range(1, 37)
-            if n not in winning_numbers
-        ]
-
-        ticket_numbers.extend(
-            random.sample(
-                non_winning_numbers,
-                9 - len(ticket_numbers)
-            )
-        )
+        ticket_numbers.extend(random.sample(non_winning, 9 - len(ticket_numbers)))
 
         random.shuffle(ticket_numbers)
 
@@ -324,14 +272,11 @@ class Gambling(commands.Cog):
 
         embed = discord.Embed(
             title="🎟 Scratch-Off Ticket",
-            description=(
-                f"🏆 Winning Numbers: "
-                f"{', '.join(map(str, winning_numbers))}"
-            )
+            description=f"🏆 Winning Numbers: {', '.join(map(str, winning_numbers))}"
         )
 
         await interaction.response.send_message(
-            embed=embed,
+            embeds=[purchase_embed, embed],
             view=view
         )
 

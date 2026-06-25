@@ -1,9 +1,13 @@
 import time
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from db.connection import get_pool
 from db.users import upsert_user
+
+# Import ONLY add_xp (no embed imports)
+from cogs.xp_engine import add_xp
 
 
 BASE_XP = 500
@@ -15,24 +19,80 @@ class Progression(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @discord.app_commands.command(name="level", description="Check your XP and level")
+    # =====================================================
+    # 📊 LEVEL COMMAND (DB-DRIVEN XP REQUIREMENTS)
+    # =====================================================
+    @app_commands.command(name="level", description="Check your XP and level")
     async def level(self, interaction: discord.Interaction):
+
         pool = get_pool()
+        guild_id = interaction.guild.id if interaction.guild else 0
 
         async with pool.acquire() as conn:
-            await upsert_user(conn, interaction.user.id, str(interaction.user))
 
+            # Ensure user exists
+            await upsert_user(
+                conn,
+                interaction.user.id,
+                guild_id,
+                interaction.user.name
+            )
+
+            # Fetch XP + Level
             user = await conn.fetchrow(
                 """
                 SELECT xp, level
                 FROM users
                 WHERE discord_id = $1
+                  AND guild_id = $2
                 """,
-                interaction.user.id
+                interaction.user.id,
+                guild_id
             )
 
-        if not user:
-            return await interaction.response.send_message("User not found.")
+            if not user:
+                return await interaction.response.send_message(
+                    "User not found.",
+                    ephemeral=True
+                )
+
+            xp = user["xp"] or 0
+            level = user["level"] or 1
+
+            # Fetch XP required for CURRENT level
+            current_row = await conn.fetchrow(
+                """
+                SELECT xp_required
+                FROM cd_levels
+                WHERE level = $1
+                """,
+                level
+            )
+
+            current_level_xp = current_row["xp_required"] if current_row else 0
+
+            # Fetch XP required for NEXT level
+            next_row = await conn.fetchrow(
+                """
+                SELECT xp_required
+                FROM cd_levels
+                WHERE level = $1
+                """,
+                level + 1
+            )
+
+            next_level_xp = next_row["xp_required"] if next_row else current_level_xp
+
+        # ============================
+        # CORRECT PROGRESS CALCULATION
+        # ============================
+
+        span = next_level_xp - current_level_xp
+        gained = xp - current_level_xp
+
+        progress = max(0, min(gained / span, 1))
+        filled = int(progress * 20)
+        bar = "█" * filled + "░" * (20 - filled)
 
         roast = [
             "You’re basically a tutorial NPC at this point.",
@@ -42,43 +102,93 @@ class Progression(commands.Cog):
             "Respectable. For a human."
         ]
 
-        embed = discord.Embed(
-            title=f"📊 {interaction.user.name}'s Stats",
-            description=roast[hash(interaction.user.id) % len(roast)],
-            color=discord.Color.blurple()
+        color = (
+            discord.Color.green() if level >= 50 else
+            discord.Color.gold() if level >= 25 else
+            discord.Color.blurple()
         )
 
-        embed.add_field(name="⭐ XP", value=str(user["xp"]), inline=True)
-        embed.add_field(name="📈 Level", value=str(user["level"]), inline=True)
+        # ============================
+        # BEAUTIFUL LEVEL PROFILE CARD
+        # ============================
+
+        embed = discord.Embed(
+            title=f"🏅 {interaction.user.name}",
+            description=f"**Level {level}** • {roast[hash(interaction.user.id) % len(roast)]}",
+            color=color
+        )
+
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+        embed.add_field(
+            name="🔥 Current XP",
+            value=f"**{xp:,}**",
+            inline=True
+        )
+
+        embed.add_field(
+            name="⬆️ Next Level",
+            value=f"**{next_level_xp:,} XP**",
+            inline=True
+        )
+
+        embed.add_field(
+            name="📈 Progress",
+            value=f"`{bar}`\n**{int(progress * 100)}%** complete",
+            inline=False
+        )
+
+        embed.set_footer(
+            text="Keep grinding. Or don’t. I’m not your boss."
+        )
 
         await interaction.response.send_message(embed=embed)
 
-    @discord.app_commands.command(name="daily", description="Claim your daily XP and money reward")
+    # =====================================================
+    # 🎁 DAILY COMMAND
+    # =====================================================
+    @app_commands.command(name="daily", description="Claim your daily XP and money reward")
     async def daily(self, interaction: discord.Interaction):
+
         pool = get_pool()
         now = int(time.time())
+        guild_id = interaction.guild.id if interaction.guild else 0
 
         async with pool.acquire() as conn:
-            await upsert_user(conn, interaction.user.id, str(interaction.user))
+
+            await upsert_user(
+                conn,
+                interaction.user.id,
+                guild_id,
+                interaction.user.name
+            )
 
             user = await conn.fetchrow(
                 """
-                SELECT xp, checking_account_balance, daily_last_claim, daily_streak
+                SELECT xp,
+                       checking_account_balance,
+                       daily_last_claim,
+                       daily_streak
                 FROM users
                 WHERE discord_id = $1
+                  AND guild_id = $2
                 """,
-                interaction.user.id
+                interaction.user.id,
+                guild_id
             )
 
             if not user:
-                return await interaction.response.send_message("User not found.")
+                return await interaction.response.send_message(
+                    "User not found.",
+                    ephemeral=True
+                )
 
             xp = user["xp"] or 0
             balance = user["checking_account_balance"] or 0
             last_claim = user["daily_last_claim"] or 0
             streak = user["daily_streak"] or 0
 
-            # cooldown check
+            # Cooldown check
             if now - last_claim < COOLDOWN:
                 remaining = COOLDOWN - (now - last_claim)
                 hours = remaining // 3600
@@ -92,7 +202,7 @@ class Progression(commands.Cog):
 
                 return await interaction.response.send_message(embed=embed, ephemeral=True)
 
-            # streak logic
+            # Streak logic
             if last_claim and now - last_claim <= COOLDOWN * 2:
                 streak += 1
             else:
@@ -103,25 +213,35 @@ class Progression(commands.Cog):
             reward_xp = int(BASE_XP * multiplier)
             reward_money = int(BASE_MONEY * multiplier)
 
-            new_xp = xp + reward_xp
             new_balance = balance + reward_money
 
+            # XP Engine
+            result = await add_xp(
+                conn,
+                interaction.user.id,
+                guild_id,
+                reward_xp,
+                xp
+            )
+
+            # Update DB
             await conn.execute(
                 """
                 UPDATE users
-                SET xp = $1,
-                    checking_account_balance = $2,
-                    daily_last_claim = $3,
-                    daily_streak = $4
-                WHERE discord_id = $5
+                SET checking_account_balance = $1,
+                    daily_last_claim = $2,
+                    daily_streak = $3
+                WHERE discord_id = $4
+                  AND guild_id = $5
                 """,
-                new_xp,
                 new_balance,
                 now,
                 streak,
-                interaction.user.id
+                interaction.user.id,
+                guild_id
             )
 
+        # Daily reward embed
         embed = discord.Embed(
             title="🎉 Daily Claimed",
             description="You showed up. That’s suspiciously consistent.",
@@ -132,14 +252,27 @@ class Progression(commands.Cog):
         embed.add_field(name="⭐ XP", value=f"+{reward_xp}", inline=True)
         embed.add_field(name="💰 Money", value=f"+${reward_money:,}", inline=False)
 
-        if streak >= 5:
-            embed.add_field(
-                name="⚠️ Warning",
-                value="You are dangerously close to becoming consistent.",
+        await interaction.response.send_message(embed=embed)
+
+        # Level up embed (legacy — you can remove this if using xp_engine embeds)
+        if result["leveled_up"]:
+            data = result["levelup_data"]
+
+            levelup_embed = discord.Embed(
+                title="🎉 LEVEL UP!",
+                description=data["message"],
+                color=discord.Color.gold()
+            )
+
+            levelup_embed.add_field(
+                name="📈 Progress",
+                value="You are becoming dangerously competent.",
                 inline=False
             )
 
-        await interaction.response.send_message(embed=embed)
+            levelup_embed.set_footer(text="XP Engine • Life Simulation Core")
+
+            await interaction.followup.send(embed=levelup_embed)
 
 
 async def setup(bot):

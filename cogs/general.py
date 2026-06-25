@@ -18,7 +18,8 @@ class General(commands.Cog):
             await upsert_user(
                 conn,
                 interaction.user.id,
-                str(interaction.user)
+                str(interaction.user),
+                interaction.guild.id
             )
 
         await interaction.response.send_message("pong")

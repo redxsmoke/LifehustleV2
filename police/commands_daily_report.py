@@ -36,8 +36,13 @@ class DailyReportCommands(commands.Cog):
 
         view = DailyCrimeReportView(crimes, interaction.guild.id)
 
+        # ------------------------------------------------------------
+        # ⭐ FIXED LINE — MUST AWAIT build_page()
+        # ------------------------------------------------------------
+        embed = await view.build_page()
+
         await interaction.response.send_message(
-            embed=view.build_page(),
+            embed=embed,
             view=view
         )
 

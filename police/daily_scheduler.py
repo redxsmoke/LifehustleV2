@@ -9,7 +9,8 @@ class DailyCrimeScheduler(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.daily_crimes = {}  # guild_id → list of crime rows
-        self.run_daily_report.start()
+        # IMPORTANT: loop is NOT started here anymore
+
 
     # ------------------------------------------------------------
     # WAIT UNTIL MIDNIGHT (DISABLED FOR TESTING)
@@ -23,17 +24,14 @@ class DailyCrimeScheduler(commands.Cog):
         await asyncio.sleep(seconds)
 
     # ------------------------------------------------------------
-    # DAILY TASK (RUNS EVERY 10 SECONDS FOR TESTING)
+    # DAILY TASK (RUNS EVERY 24 HOURS)
     # ------------------------------------------------------------
     @tasks.loop(hours=24)
     async def run_daily_report(self):
         await self.bot.wait_until_ready()
 
-        # ------------------------------------------------------------
-        # DISABLED FOR TESTING — RUNS IMMEDIATELY
-        # ------------------------------------------------------------
+        # (Midnight wait disabled for testing)
         # await self.wait_until_midnight()
-        # ------------------------------------------------------------
 
         for guild in self.bot.guilds:
             guild_id = guild.id
@@ -52,4 +50,8 @@ class DailyCrimeScheduler(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(DailyCrimeScheduler(bot))
+    scheduler = DailyCrimeScheduler(bot)
+    await bot.add_cog(scheduler)
+
+    # START LOOP HERE — AFTER BOT IS LOADED
+    scheduler.run_daily_report.start()

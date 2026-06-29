@@ -1,10 +1,11 @@
 import sys
-print("🔥 RUNNING PYTHON FROM:", sys.executable)
+print("RUNNING PYTHON FROM:", sys.executable)
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
 import asyncio
+import logging
 
 from db.connection import init_db, get_pool
 from db.users import upsert_user
@@ -44,13 +45,14 @@ class MyBot(commands.Bot):
         await self.load_extension("cogs.occupations")
         await self.load_extension("cogs.crime_commands")
         await self.load_extension("cogs.shop.shop")
-        
-
+        await self.load_extension("cogs.deletemessages")
+        await self.load_extension("users.views_civinfo")
+        await self.load_extension("cogs.itemscommands.items_commands")
 
         # POLICE SYSTEM
         await self.load_extension("police.daily_scheduler")
         await self.load_extension("police.commands_daily_report")
-        await bot.load_extension("police.clue_scheduler")
+        await self.load_extension("police.clue_scheduler")
 
         # =========================
         # COMMAND SYNC
@@ -64,6 +66,13 @@ class MyBot(commands.Bot):
         print("Commands currently loaded:")
         for cmd in self.tree.get_commands():
             print(f"- {cmd.name}")
+
+        # =========================
+        # IMPORTANT:
+        # Removed the manual call to run_daily_report()
+        # This was freezing READY and breaking ClueScheduler
+        # =========================
+        pass
 
     # =========================================================
     # USER BOOTSTRAP (FIXED + RELIABLE)
@@ -91,17 +100,10 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-
-    # Sync slash commands
-    await bot.tree.sync()
-    print("Slash commands synced.")
-
-    # Force scheduler to run immediately
-    scheduler = bot.get_cog("DailyCrimeScheduler")
-    if scheduler:
-        print("Scheduler found, forcing first run...")
-        await scheduler.run_daily_report()
+    try:
+        print(f" bot.user = {bot.user}")
+    except Exception as e:
+        print("❌ ERROR INSIDE on_ready:", e)
 
 
 async def main():

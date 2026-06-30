@@ -9,10 +9,8 @@ logger.setLevel(logging.ERROR)
 
 
 # ============================================================
-# STREET CRED (ensure this exists in DB)
-# ALTER TABLE users ADD COLUMN street_cred INTEGER NOT NULL DEFAULT 0;
+# STREET CRED
 # ============================================================
-
 
 class ReportToPoliceButton(discord.ui.Button):
     def __init__(self, victim: discord.Member):
@@ -79,42 +77,50 @@ class NoSnitchButton(discord.ui.Button):
 
 
 class GTAReportView(discord.ui.View):
-    def __init__(self, victim: discord.Member):
+    def __init__(self, victim: discord.Member, criminal_id: int):
         super().__init__(timeout=15)
         self.victim = victim
+        self.criminal_id = criminal_id
         self.message: discord.Message | None = None
+
         self.add_item(ReportToPoliceButton(victim))
         self.add_item(NoSnitchButton(victim))
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Criminal CANNOT interact with the report buttons
+        if interaction.user.id == self.criminal_id:
+            await interaction.response.send_message(
+                "You cannot report your own crime.", ephemeral=True
+            )
+            return False
+
+        return True
+
     async def on_timeout(self):
         for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
+            child.disabled = True
         try:
             if self.message:
                 await self.message.edit(view=self)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Error updating GTAReportView on timeout: %s", e)
+
+
 
 
 # ============================================================
-# KEYPAD GAME (VAULT-STYLE CLUE SYSTEM)
+# KEYPAD GAME
 # ============================================================
-
 
 class GTAKeypadGame:
     def __init__(self):
         self.code = [random.randint(0, 9) for _ in range(3)]
         self.attempts = 0
-        self.noise = 0.0  # 0–100
+        self.noise = 0.0
+
+        logger.info(f"[Stage1] Keypad code generated: {self.code}")
 
     def check_guess(self, guess_str: str):
-        """
-        Returns:
-            status: "invalid", "unlocked", or "clues"
-            clues_str: string like "✅ ⚠️ ❌"
-            noise_full: bool (True if noise >= 100)
-        """
         if len(guess_str) != 3 or not guess_str.isdigit():
             return "invalid", None, False
 
@@ -135,7 +141,6 @@ class GTAKeypadGame:
         if guess == self.code:
             return "unlocked", clues_str, False
 
-        # Incorrect guess → +20% noise, capped at 100
         self.noise += 20.0
         if self.noise > 100.0:
             self.noise = 100.0
@@ -148,7 +153,6 @@ class GTAKeypadGame:
 # STAGE 1 ENTRY POINT
 # ============================================================
 
-
 async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discord.Member):
     try:
         view = GTAStage1View(interaction.user.id, bot, victim, interaction.channel)
@@ -158,11 +162,10 @@ async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discor
             description=(
                 f"You approach **{victim.mention}**'s vehicle.\n\n"
                 "Choose how you want to proceed:\n\n"
-                "🔢 **Enter Car Code** — Try to crack the 3-digit keypad.\n"
-                "💥 **Smash Window** — Loud, guaranteed noise.\n\n"
-                "Each wrong keypad guess increases the **noise meter by 20%**.\n"
-                "At **100% noise**, a neighborhood broadcast goes out.\n"
-                "You can keep guessing even after the broadcast until you crack the code."
+                "🔢 Enter Car Code\n"
+                "💥 Smash Window\n\n"
+                "Wrong guesses increase noise by 20%.\n"
+                "At 100% noise, a broadcast goes out."
             ),
             color=discord.Color.orange()
         )
@@ -175,12 +178,9 @@ async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discor
             await interaction.response.send_message("❌ Error starting GTA Stage 1.", ephemeral=True)
         except Exception:
             pass
-
-
 # ============================================================
 # STAGE 1 VIEW (CHOICE: CAR CODE OR SMASH WINDOW)
 # ============================================================
-
 
 class GTAStage1View(discord.ui.View):
     def __init__(self, user_id: int, bot, victim: discord.Member, channel: discord.TextChannel):
@@ -209,6 +209,16 @@ class EnterCarCodeButton(discord.ui.Button):
                 "This isn't your break‑in.", ephemeral=True
             )
 
+        # Disable both buttons
+        for child in self.parent_view.children:
+            child.disabled = True
+
+        # FIXED: ephemeral message must be edited via response.edit_message()
+        try:
+            await interaction.response.edit_message(view=self.parent_view)
+        except Exception as e:
+            logger.exception("Failed to edit ephemeral message in EnterCarCodeButton: %s", e)
+
         try:
             game = GTAKeypadGame()
             keypad_view = GTAKeypadView(
@@ -234,13 +244,10 @@ class EnterCarCodeButton(discord.ui.Button):
                 color=discord.Color.blue()
             )
 
-            msg = await self.parent_view.channel.send(
-                embed=embed,
-                view=keypad_view,
-            )
+            msg = await self.parent_view.channel.send(embed=embed, view=keypad_view)
             keypad_view.status_message = msg
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Keypad initialized. Use the number pad below to enter the code.",
                 ephemeral=True
             )
@@ -248,7 +255,7 @@ class EnterCarCodeButton(discord.ui.Button):
         except Exception as e:
             logger.exception("Error initializing keypad: %s", e)
             try:
-                await interaction.response.send_message("❌ Error initializing keypad.", ephemeral=True)
+                await interaction.followup.send("❌ Error initializing keypad.", ephemeral=True)
             except Exception:
                 pass
 
@@ -264,26 +271,52 @@ class SmashWindowButton(discord.ui.Button):
                 "This isn't your break‑in.", ephemeral=True
             )
 
-        try:
-            embed = discord.Embed(
-                title="💥 Window Smashed!",
-                description=(
-                    f"You smash **{self.parent_view.victim.mention}**'s window.\n"
-                    "It is **not** a silent break.\n\n"
-                    "Noise instantly hits **100%** and the neighborhood is alerted."
-                ),
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Disable both buttons
+        for child in self.parent_view.children:
+            child.disabled = True
 
-            if not self.parent_view.broadcast_triggered:
-                self.parent_view.broadcast_triggered = True
-                await trigger_noise_broadcast(interaction, self.parent_view.victim)
+        # FIXED: ephemeral message must be edited via response.edit_message()
+        try:
+            await interaction.response.edit_message(view=self.parent_view)
+        except Exception as e:
+            logger.exception("Failed to edit ephemeral message in SmashWindowButton: %s", e)
+
+        try:
+            from .smash_window import SmashWindowView
+
+            async def stage2_callback():
+                try:
+                    await start_stage2(interaction, self.parent_view.bot, self.parent_view.victim)
+                except Exception as e:
+                    logger.exception("Error in stage2_callback (SmashWindowButton): %s", e)
+
+            view = SmashWindowView(
+                user_id=self.parent_view.user_id,
+                victim=self.parent_view.victim,
+                stage2_callback=stage2_callback
+            )
+
+            embed = discord.Embed(
+                title="💥 Smash Window Minigame",
+                description=(
+                    "Time your smash to avoid making noise!\n\n"
+                    "**You have 20 seconds to break the window.**"
+                ),
+                color=discord.Color.orange()
+            )
+
+            msg = await self.parent_view.channel.send(embed=embed, view=view)
+            await view.start_animation(msg)
+
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
 
         except Exception as e:
-            logger.exception("Error in SmashWindowButton.callback: %s", e)
+            logger.exception("Error starting Smash Window minigame: %s", e)
             try:
-                await interaction.followup.send("❌ Error smashing window.", ephemeral=True)
+                await interaction.followup.send("❌ Error starting Smash Window.", ephemeral=True)
             except Exception:
                 pass
 
@@ -291,7 +324,6 @@ class SmashWindowButton(discord.ui.Button):
 # ============================================================
 # KEYPAD VIEW (NUMBER PAD + STATUS EMBED)
 # ============================================================
-
 
 class GTAKeypadView(discord.ui.View):
     def __init__(
@@ -316,12 +348,7 @@ class GTAKeypadView(discord.ui.View):
         self.last_clues: str | None = None
         self.broadcast_triggered: bool = stage1_view.broadcast_triggered
 
-        # Keypad layout:
-        # 1 2 3
-        # 4 5 6
-        # 7 8 9
-        # Clear 0 Submit
-
+        # Keypad layout
         self.add_item(DigitButton("1", self))
         self.add_item(DigitButton("2", self))
         self.add_item(DigitButton("3", self))
@@ -338,11 +365,14 @@ class GTAKeypadView(discord.ui.View):
         self.add_item(DigitButton("0", self))
         self.add_item(SubmitButton(self))
 
+        # Smash Window inside keypad
+        self.add_item(SmashWindowDuringCodeButton(self))
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
-
     async def update_status_embed(self):
         if not self.status_message:
+            logger.error("update_status_embed called with no status_message")
             return
 
         enter_code_line = "`___`"
@@ -376,6 +406,62 @@ class GTAKeypadView(discord.ui.View):
             logger.exception("Error updating status embed: %s", e)
 
 
+class SmashWindowDuringCodeButton(discord.ui.Button):
+    def __init__(self, keypad_view: GTAKeypadView):
+        super().__init__(label="💥 Smash Window", style=discord.ButtonStyle.danger)
+        self.keypad_view = keypad_view
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.keypad_view.user_id:
+            return await interaction.response.send_message(
+                "This isn't your break‑in.", ephemeral=True
+            )
+
+        # Disable keypad buttons
+        for child in self.keypad_view.children:
+            child.disabled = True
+
+        try:
+            await self.keypad_view.status_message.edit(view=self.keypad_view)
+        except Exception as e:
+            logger.exception("Failed to disable keypad buttons: %s", e)
+
+        # Cancel keypad game
+        embed = discord.Embed(
+            title="💥 Smash Window",
+            description=(
+                "Keypad cancelled.\n"
+                "Starting Smash Window minigame...\n\n"
+                "**You have 20 seconds to break the window.**"
+            ),
+            color=discord.Color.orange()
+        )
+        await self.keypad_view.channel.send(embed=embed)
+
+        # Start Smash Window minigame
+        from .smash_window import SmashWindowView
+
+        async def stage2_callback():
+            try:
+                await start_stage2(interaction, self.keypad_view.bot, self.keypad_view.victim)
+            except Exception as e:
+                logger.exception("Error in stage2_callback (keypad smash): %s", e)
+
+        view = SmashWindowView(
+            user_id=self.keypad_view.user_id,
+            victim=self.keypad_view.victim,
+            stage2_callback=stage2_callback
+        )
+
+        msg = await self.keypad_view.channel.send(view=view)
+        await view.start_animation(msg)
+
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+
 class DigitButton(discord.ui.Button):
     def __init__(self, digit: str, keypad_view: GTAKeypadView):
         super().__init__(label=digit, style=discord.ButtonStyle.secondary)
@@ -396,7 +482,11 @@ class DigitButton(discord.ui.Button):
 
         self.keypad_view.buffer += self.digit
         await self.keypad_view.update_status_embed()
-        await interaction.response.defer(ephemeral=True)
+
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
 
 
 class ClearButton(discord.ui.Button):
@@ -412,7 +502,11 @@ class ClearButton(discord.ui.Button):
 
         self.keypad_view.buffer = ""
         await self.keypad_view.update_status_embed()
-        await interaction.response.defer(ephemeral=True)
+
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
 
 
 class SubmitButton(discord.ui.Button):
@@ -436,28 +530,28 @@ class SubmitButton(discord.ui.Button):
             status, clues_str, noise_full = self.keypad_view.game.check_guess(self.keypad_view.buffer)
 
             if status == "invalid":
-                await interaction.response.send_message(
+                return await interaction.response.send_message(
                     "Invalid code. Enter a **3-digit numeric** code.",
                     ephemeral=True
                 )
-                return
 
-            # Store clues
             self.keypad_view.last_clues = clues_str
 
-            # AUTO‑CLEAR BUFFER AFTER FAILED ATTEMPT
             if status == "clues":
                 self.keypad_view.buffer = ""
 
             await self.keypad_view.update_status_embed()
-            await interaction.response.defer(ephemeral=True)
+
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
 
             if status == "unlocked":
                 embed = discord.Embed(
                     title="🔓 Vehicle Unlocked!",
                     description=(
                         "You successfully cracked the keypad and unlocked the vehicle.\n\n"
-                        f"**Final Code Entered:** `{self.keypad_view.buffer}`\n"
                         f"**Clues:** {clues_str}\n"
                         f"**Attempts:** {self.keypad_view.game.attempts}\n"
                         f"**Noise:** {min(self.keypad_view.game.noise, 100):.0f}%"
@@ -484,7 +578,6 @@ class SubmitButton(discord.ui.Button):
 # NOISE BROADCAST
 # ============================================================
 
-
 async def trigger_noise_broadcast(interaction: discord.Interaction, victim: discord.Member):
     try:
         channel = interaction.channel
@@ -494,13 +587,15 @@ async def trigger_noise_broadcast(interaction: discord.Interaction, victim: disc
             description=(
                 f"Someone is trying to break into {victim.mention}'s vehicle!\n\n"
                 "You have **15 seconds** to report this crime.\n\n"
-                "🔴 **Report to Police** — lose street cred\n"
-                "🟢 **I Ain't No Snitch** — gain street cred"
+                "🔴 Report to Police — lose street cred\n"
+                "🟢 I Ain't No Snitch — gain street cred"
             ),
             color=discord.Color.red()
         )
 
-        view = GTAReportView(victim)
+        criminal_id = interaction.user.id  # the one who caused the noise
+
+        view = GTAReportView(victim, criminal_id)
         msg = await channel.send(embed=embed, view=view)
         view.message = msg
 
@@ -511,7 +606,6 @@ async def trigger_noise_broadcast(interaction: discord.Interaction, victim: disc
 # ============================================================
 # STAGE 2 STUB
 # ============================================================
-
 
 async def start_stage2(interaction: discord.Interaction, bot, victim: discord.Member):
     try:

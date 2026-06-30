@@ -1,13 +1,17 @@
 import discord
 import logging
 from db.connection import get_pool
+from datetime import datetime, timedelta
 
 # ⭐ LOGGER FOR GTA ERRORS
 logger = logging.getLogger("crime.gtaerrors")
 logger.setLevel(logging.ERROR)
 
+# GTA cooldown (currently 0 hours)
+COOLDOWN_HOURS = 0
+GTA_COOLDOWN = timedelta(hours=COOLDOWN_HOURS)
 
-# ⭐ NORMALIZE (COPIED FROM POLICE FLOW)
+
 def normalize(text: str) -> str:
     import unicodedata
     if not text:
@@ -17,7 +21,6 @@ def normalize(text: str) -> str:
     return text.lower()
 
 
-# ⭐ GTA VICTIM SEARCH (nickname/username, multi‑match, self‑block)
 class GTASelectVictimModal(discord.ui.Modal, title="Select a Car Theft Victim"):
     victim_name = discord.ui.TextInput(
         label="Victim nickname (not @mention)",
@@ -43,7 +46,9 @@ class GTASelectVictimModal(discord.ui.Modal, title="Select a Car Theft Victim"):
                 )
                 return
 
+            pool = get_pool()
             matches = []
+
             for member in guild.members:
                 nickname = member.display_name or ""
                 username = member.name or ""
@@ -57,19 +62,39 @@ class GTASelectVictimModal(discord.ui.Modal, title="Select a Car Theft Victim"):
                     or query == u_norm
                     or query in u_norm
                 ):
-                    matches.append(member)
+                    async with pool.acquire() as conn:
+                        row = await conn.fetchrow("""
+                            SELECT last_stolen_at
+                            FROM user_vehicles
+                            WHERE discord_id = $1
+                              AND guild_id = $2
+                              AND is_active = TRUE
+                            LIMIT 1
+                        """, member.id, guild.id)
+
+                    if row:
+                        last_stolen = row["last_stolen_at"]
+                        if last_stolen:
+                            if datetime.utcnow() - last_stolen < GTA_COOLDOWN:
+                                continue
+
+                        matches.append(member)
 
             if len(matches) == 0:
-                await interaction.response.send_message(
-                    "❌ No matching users found. Try typing more of their nickname.",
-                    ephemeral=True
+                embed = discord.Embed(
+                    title="🚫 No Active Vehicle",
+                    description=(
+                        "This user does not currently have an active vehicle. "
+                        "Please try another user or try this user again later."
+                    ),
+                    color=discord.Color.red()
                 )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
 
             if len(matches) == 1:
                 victim = matches[0]
 
-                # ⭐ FUNNY SELF‑BLOCK
                 if victim.id == interaction.user.id:
                     await interaction.response.send_message(
                         "🧠 You are dumber than SpongeBob and Patrick on free balloon day.\n\n"
@@ -96,7 +121,6 @@ class GTASelectVictimModal(discord.ui.Modal, title="Select a Car Theft Victim"):
                 )
                 return
 
-            # ⭐ MULTI‑MATCH DROPDOWN
             view = GTAVictimSelectView(matches, self.bot)
             await interaction.response.send_message(
                 "Multiple matches found. Select the correct victim:",
@@ -143,7 +167,43 @@ class GTAVictimSelect(discord.ui.Select):
                 )
                 return
 
-            # ⭐ FUNNY SELF‑BLOCK
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    SELECT last_stolen_at
+                    FROM user_vehicles
+                    WHERE discord_id = $1
+                      AND guild_id = $2
+                      AND is_active = TRUE
+                    LIMIT 1
+                """, victim.id, interaction.guild.id)
+
+            if not row:
+                embed = discord.Embed(
+                    title="🚫 No Active Vehicle",
+                    description=(
+                        "This user does not currently have an active vehicle. "
+                        "Please try another user or try this user again later."
+                    ),
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            last_stolen = row["last_stolen_at"]
+            if last_stolen:
+                if datetime.utcnow() - last_stolen < GTA_COOLDOWN:
+                    embed = discord.Embed(
+                        title="⏳ Vehicle Theft Cooldown",
+                        description=(
+                            "This user recently had a vehicle stolen.\n"
+                            "Please try again later."
+                        ),
+                        color=discord.Color.orange()
+                    )
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
+                    return
+
             if victim.id == interaction.user.id:
                 await interaction.response.send_message(
                     "🧠 You are dumber than SpongeBob and Patrick on free balloon day.\n\n"
@@ -239,9 +299,6 @@ class TheftLocationDropdown(discord.ui.Select):
             user_id = interaction.user.id
             guild_id = interaction.guild.id
 
-            # ============================
-            # CHECK LOCATION (must be at Work)
-            # ============================
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
@@ -262,9 +319,6 @@ class TheftLocationDropdown(discord.ui.Select):
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
 
-            # ============================
-            # ⭐ EMPLOYMENT CHECK (must have active job)
-            # ============================
             async with pool.acquire() as conn:
                 employed = await conn.fetchval("""
                     SELECT 1
@@ -284,9 +338,6 @@ class TheftLocationDropdown(discord.ui.Select):
                     ephemeral=True
                 )
 
-            # ============================
-            # RUN ROBBERY
-            # ============================
             cog = self.parent_view.bot.get_cog("CrimeCommands")
             if cog:
                 try:

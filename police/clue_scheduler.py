@@ -312,5 +312,5 @@ class ClueScheduler(commands.Cog):
 
 
 async def setup(bot):
-    cog = ClueScheduler(bot, test_mode=True)
+    cog = ClueScheduler(bot, test_mode=False)
     await bot.add_cog(cog)

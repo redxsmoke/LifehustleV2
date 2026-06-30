@@ -193,7 +193,7 @@ class CrimeCommands(commands.Cog):
 
             # ⭐ Try to import Stage 1; if not present, fail gracefully
             try:
-                from cogs.minigames.gta.stage1 import start_gta_stage1
+                from cogs.minigames.grandtheftauto.stage1 import start_gta_stage1
             except ModuleNotFoundError:
                 # GTA not implemented yet → tell the user, don't crash
                 await interaction.response.send_message(

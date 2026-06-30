@@ -1,5 +1,182 @@
 import discord
+import logging
 from db.connection import get_pool
+
+# ⭐ LOGGER FOR GTA ERRORS
+logger = logging.getLogger("crime.gtaerrors")
+logger.setLevel(logging.ERROR)
+
+
+# ⭐ NORMALIZE (COPIED FROM POLICE FLOW)
+def normalize(text: str) -> str:
+    import unicodedata
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return text.lower()
+
+
+# ⭐ GTA VICTIM SEARCH (nickname/username, multi‑match, self‑block)
+class GTASelectVictimModal(discord.ui.Modal, title="Select a Car Theft Victim"):
+    victim_name = discord.ui.TextInput(
+        label="Victim nickname (not @mention)",
+        placeholder="Type part of their nickname",
+        required=True,
+        max_length=64
+    )
+
+    def __init__(self, bot):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            raw = self.victim_name.value or ""
+            query = normalize(raw.strip())
+
+            guild = interaction.guild
+            if guild is None:
+                await interaction.response.send_message(
+                    "❌ Cannot search for victims outside a server.",
+                    ephemeral=True
+                )
+                return
+
+            matches = []
+            for member in guild.members:
+                nickname = member.display_name or ""
+                username = member.name or ""
+
+                n_norm = normalize(nickname)
+                u_norm = normalize(username)
+
+                if (
+                    query == n_norm
+                    or query in n_norm
+                    or query == u_norm
+                    or query in u_norm
+                ):
+                    matches.append(member)
+
+            if len(matches) == 0:
+                await interaction.response.send_message(
+                    "❌ No matching users found. Try typing more of their nickname.",
+                    ephemeral=True
+                )
+                return
+
+            if len(matches) == 1:
+                victim = matches[0]
+
+                # ⭐ FUNNY SELF‑BLOCK
+                if victim.id == interaction.user.id:
+                    await interaction.response.send_message(
+                        "🧠 You are dumber than SpongeBob and Patrick on free balloon day.\n\n"
+                        "🚗 It's not a crime to steal **your own car**.",
+                        ephemeral=True
+                    )
+                    return
+
+                cog = self.bot.get_cog("CrimeCommands")
+                if not cog:
+                    await interaction.response.send_message(
+                        "⚠️ Crime system unavailable.",
+                        ephemeral=True
+                    )
+                    return
+
+                await cog.handle_grand_theft_auto(interaction, victim)
+                return
+
+            if len(matches) > 25:
+                await interaction.response.send_message(
+                    "❌ Too many matches found. Please type more of the nickname.",
+                    ephemeral=True
+                )
+                return
+
+            # ⭐ MULTI‑MATCH DROPDOWN
+            view = GTAVictimSelectView(matches, self.bot)
+            await interaction.response.send_message(
+                "Multiple matches found. Select the correct victim:",
+                view=view,
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.exception("Error in GTASelectVictimModal.on_submit: %s", e)
+            try:
+                await interaction.response.send_message(
+                    "❌ Something went wrong while selecting a victim.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+
+
+class GTAVictimSelect(discord.ui.Select):
+    def __init__(self, matches, bot):
+        options = [
+            discord.SelectOption(label=f"{m.display_name} ({m.name})", value=str(m.id))
+            for m in matches
+        ]
+
+        super().__init__(
+            placeholder="Select the victim",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+        self.bot = bot
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            victim_id = int(self.values[0])
+            victim = interaction.guild.get_member(victim_id)
+
+            if victim is None:
+                await interaction.response.send_message(
+                    "❌ That user is no longer in the server.",
+                    ephemeral=True
+                )
+                return
+
+            # ⭐ FUNNY SELF‑BLOCK
+            if victim.id == interaction.user.id:
+                await interaction.response.send_message(
+                    "🧠 You are dumber than SpongeBob and Patrick on free balloon day.\n\n"
+                    "🚗 It's not a crime to steal **your own car**.",
+                    ephemeral=True
+                )
+                return
+
+            cog = self.bot.get_cog("CrimeCommands")
+            if not cog:
+                await interaction.response.send_message(
+                    "⚠️ Crime system unavailable.",
+                    ephemeral=True
+                )
+                return
+
+            await cog.handle_grand_theft_auto(interaction, victim)
+
+        except Exception as e:
+            logger.exception("Error in GTAVictimSelect.callback: %s", e)
+            try:
+                await interaction.response.send_message(
+                    "❌ Something went wrong while selecting a victim.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+
+
+class GTAVictimSelectView(discord.ui.View):
+    def __init__(self, matches, bot):
+        super().__init__(timeout=60)
+        self.add_item(GTAVictimSelect(matches, bot))
 
 
 class CrimeSelectionView(discord.ui.View):
@@ -49,6 +226,7 @@ class TheftLocationDropdown(discord.ui.Select):
     def __init__(self, parent_view):
         options = [
             discord.SelectOption(label="Rob your job", description="Steal from your workplace"),
+            discord.SelectOption(label="Grand Theft Auto", description="Steal someone's car"),
         ]
         super().__init__(placeholder="Select location...", min_values=1, max_values=1, options=options)
         self.parent_view = parent_view
@@ -146,44 +324,15 @@ class TheftLocationDropdown(discord.ui.Select):
                     ephemeral=True
                 )
 
-
-class ConfirmRobberyView(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=60)
-        self.user_id = user_id
-        self.value = None
-        self.user_interaction = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Not your robbery.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.green)
-    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.value = True
-        self.user_interaction = interaction
-
-        embed = discord.Embed(
-            title="✅ Robbery Confirmed!",
-            description="You're moving forward with the heist. Let's crack the vault...",
-            color=0x43B581
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.value = False
-        self.user_interaction = interaction
-
-        embed = discord.Embed(
-            title="❌ Robbery Cancelled",
-            description="You've backed out. Maybe next time...",
-            color=0xF04747
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        self.stop()
+        elif location == "Grand Theft Auto":
+            try:
+                await interaction.response.send_modal(GTASelectVictimModal(self.parent_view.bot))
+            except Exception as e:
+                logger.exception("Error showing GTASelectVictimModal: %s", e)
+                try:
+                    await interaction.response.send_message(
+                        "❌ Something went wrong while starting Grand Theft Auto.",
+                        ephemeral=True
+                    )
+                except Exception:
+                    pass

@@ -3,10 +3,15 @@ import random
 import unicodedata
 import logging
 import discord
+import asyncio
 from discord import ui, Embed
 from db.connection import get_pool
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from cogs.xp_engine import add_xp
+
+
+
 
 logger = logging.getLogger("police.report_suspect")
 logger.setLevel(logging.DEBUG)
@@ -403,6 +408,7 @@ class ConfirmReportButton(ui.Button):
         super().__init__(label="Confirm Report", style=discord.ButtonStyle.danger)
 
     async def callback(self, interaction: discord.Interaction):
+        print("DEBUG: ConfirmReportButton callback executing from:", __file__)
         view: ConfirmReportView = self.view
 
         await interaction.response.defer(ephemeral=True)
@@ -428,9 +434,6 @@ class ConfirmReportButton(ui.Button):
                 )
 
         except Exception as e:
-            # ------------------------------------------------------------
-            # SHOW REAL DATABASE ERROR MESSAGE IN AN EMBED
-            # ------------------------------------------------------------
             err_msg = str(e).split("\n")[0]
 
             embed = Embed(
@@ -450,7 +453,9 @@ class ConfirmReportButton(ui.Button):
         # ------------------------------------------------------------
         # EXTRACT RETURN VALUES
         # ------------------------------------------------------------
-        was_correct = row["was_correct"]
+        was_correct_raw = row["was_correct"]
+        was_correct = str(was_correct_raw).lower() in ("t", "true", "1")
+
         reward_money = row["reward_money"]
         reward_xp = row["reward_xp"]
         fine = row["fine"]
@@ -458,25 +463,103 @@ class ConfirmReportButton(ui.Button):
         checking_before = row["checking"]
 
         # ------------------------------------------------------------
-        # CORRECT REPORT
+        # CORRECT REPORT — FIRST
         # ------------------------------------------------------------
         if was_correct:
-            embed = Embed(
-                title="🎉 Correct Report!",
-                description=(
-                    f"Your report was **correct**.\n\n"
-                    f"💰 Money Reward: **${reward_money / 100:.2f}**\n"
-                    f"⭐ XP Reward: **{reward_xp} XP**"
-                ),
-                color=0x2ECC71
-            )
-            await safe_respond(interaction, embed=embed, ephemeral=True)
+
+            try:
+                # Fetch updated checking balance
+                pool = get_pool()
+                async with pool.acquire() as conn:
+                    bal_row = await conn.fetchrow("""
+                        SELECT checking_account_balance, xp
+                        FROM users
+                        WHERE discord_id = $1 AND guild_id = $2
+                    """, view.reporter_id, view.guild_id)
+
+                updated_balance = bal_row["checking_account_balance"] if bal_row else 0
+                current_xp = bal_row["xp"] if bal_row else 0
+
+                success_embed = Embed(
+                    title="🎉 You correctly identified the suspect!",
+                    description=(
+                        f"⭐ **XP Earned:** {reward_xp}\n"
+                        f"💰 **Reward:** ${reward_money / 100:,.2f}\n\n"
+                        f"🏦 **Updated Checking Account Balance:** ${updated_balance / 100:,.2f}"
+                    ),
+                    color=0x2ECC71
+                )
+
+                success_embed.set_footer(text="Great work, detective! 🕵️")
+
+                await safe_respond(interaction, embed=success_embed, ephemeral=True)
+
+            except Exception as e:
+                print("ERROR: Failure inside correct-report block BEFORE broadcast:", e)
+                return
+
+            # ------------------------------------------------------------
+            # XP REWARD + LEVEL-UP CHECK
+            # ------------------------------------------------------------
+            try:
+                pool = get_pool()
+                async with pool.acquire() as conn:
+                    xp_result = await add_xp(
+                        conn,
+                        view.reporter_id,
+                        view.guild_id,
+                        reward_xp,
+                        current_xp
+                    )
+
+                # Send level-up embed if needed
+                if xp_result["leveled_up"] and xp_result["levelup_embed"]:
+                    await interaction.followup.send(embed=xp_result["levelup_embed"], ephemeral=True)
+
+            except Exception as e:
+                print("ERROR: XP Engine failed inside correct-report block:", e)
+
+            # ------------------------------------------------------------
+            # Sleep before broadcast
+            # ------------------------------------------------------------
+            try:
+                await asyncio.sleep(5)
+            except Exception as e:
+                print("ERROR: sleep failed:", e)
+                return
+
+            # ------------------------------------------------------------
+            # Import broadcast function
+            # ------------------------------------------------------------
+            try:
+                from police.daily_snitch.daily_snitch_broadcast import send_daily_snitch_broadcast
+            except Exception as e:
+                print("ERROR: Broadcast import failed:", e)
+                return
+
+            # ------------------------------------------------------------
+            # Call broadcast function
+            # ------------------------------------------------------------
+            try:
+                await send_daily_snitch_broadcast(
+                    interaction=interaction,
+                    crime_id=view.crime_id,
+                    guild_id=view.guild_id,
+                    perp_id=view.perp_id,
+                    solver_id=view.reporter_id,
+                    is_anonymous=view.is_anonymous
+                )
+            except Exception as e:
+                print("ERROR: Broadcast function threw exception:", e)
+
             return
 
         # ------------------------------------------------------------
-        # WRONG REPORT — JAIL
+        # WRONG REPORT — JAIL (SECOND)
         # ------------------------------------------------------------
         if remaining is not None:
+            print("DEBUG: Entered jail block")
+
             embed = Embed(
                 title="🚨 Arrested for False Reporting",
                 description=(
@@ -492,8 +575,10 @@ class ConfirmReportButton(ui.Button):
             return
 
         # ------------------------------------------------------------
-        # WRONG REPORT — FINE (FUNNY VERSION)
+        # WRONG REPORT — FINE (THIRD)
         # ------------------------------------------------------------
+        print("DEBUG: Entered fine block")
+
         embed = Embed(
             title="❌ Incorrect Report",
             description=(

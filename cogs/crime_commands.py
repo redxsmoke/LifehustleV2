@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 from datetime import datetime, timedelta
+import logging
 
 from db.connection import get_pool
 from cogs.minigames.breakjob.command import start_vault_game
@@ -12,6 +13,10 @@ from cogs.gofreeme import GoFreeMeCreateModal, BribeDAButton
 
 # ⭐ NEW: universal jail helper
 from utils.jail_check import check_if_in_jail
+
+# ⭐ GTA ERROR LOGGER
+gta_logger = logging.getLogger("crime.gtaerrors")
+gta_logger.setLevel(logging.ERROR)
 
 # ============================================================
 # ⭐ NEW: Per‑Guild Cooldown Storage
@@ -169,6 +174,62 @@ class CrimeCommands(commands.Cog):
                 )
             except Exception as inner_e:
                 print(f"❌ Could not send error message: {inner_e}")
+
+    # ============================
+    # ⭐ GRAND THEFT AUTO HANDLER
+    # ============================
+    async def handle_grand_theft_auto(self, interaction: discord.Interaction, victim: discord.Member):
+        """
+        Called from crime_views.py after the user selects a GTA victim.
+        Starts GTA Stage 1.
+        """
+        try:
+            # ⭐ Use universal jail helper (same as /crime)
+            try:
+                if await check_if_in_jail(interaction):
+                    return
+            except Exception as e:
+                gta_logger.exception("GTA jail check failed: %s", e)
+
+            # ⭐ Try to import Stage 1; if not present, fail gracefully
+            try:
+                from cogs.minigames.gta.stage1 import start_gta_stage1
+            except ModuleNotFoundError:
+                # GTA not implemented yet → tell the user, don't crash
+                await interaction.response.send_message(
+                    f"🚗 You selected **{victim.display_name}**.\n"
+                    "Grand Theft Auto Stage 1 is not implemented yet.",
+                    ephemeral=True
+                )
+                return
+            except Exception as e:
+                gta_logger.exception("Failed to import start_gta_stage1: %s", e)
+                await interaction.response.send_message(
+                    "❌ Something went wrong starting Grand Theft Auto.",
+                    ephemeral=True
+                )
+                return
+
+            # ⭐ Start GTA Stage 1
+            try:
+                await start_gta_stage1(interaction, self.bot, victim)
+            except Exception as e:
+                gta_logger.exception("Error running start_gta_stage1: %s", e)
+                await interaction.response.send_message(
+                    "❌ Something went wrong starting Grand Theft Auto.",
+                    ephemeral=True
+                )
+                return
+
+        except Exception as e:
+            gta_logger.exception("Error in handle_grand_theft_auto: %s", e)
+            try:
+                await interaction.response.send_message(
+                    "❌ Something went wrong starting Grand Theft Auto.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
 
 
 async def setup(bot):

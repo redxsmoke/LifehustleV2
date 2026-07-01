@@ -1,296 +1,313 @@
-import asyncio
 import discord
+import random
+import asyncio
+import logging
+from datetime import timedelta, datetime
 
-from .engine import VaultGame
-from .views_hide import HideOnlyView
-from .views_snitch import handle_snitch
-from .police import handle_police_outcome
-from .rewards import apply_success_rewards
-from .views_police_items import PoliceItemView
 from db.connection import get_pool
 
-from utils.crime_system import (
-    log_crime,
-    get_user_company
-)
+from police.police_reported_logic.police_flow_controller import PoliceFlowController
+from police.police_reported_logic.intimidation_engine import process_snitch as handle_universal_snitch
+from police.police_reported_logic.police_items import PoliceItemView
 
-COLOR_PRIMARY = 0x2ECC71
+from .engine import VaultGame   
+
+COLOR_PRIMARY = 0x5865F2
+
+logger = logging.getLogger("crime.breakjob")
+logger.setLevel(logging.ERROR)
 
 
-class VaultGuessModal(discord.ui.Modal, title="🔢 Enter Vault Code"):
-    guess = discord.ui.TextInput(
-        label="Enter a 3-digit code",
-        max_length=3,
-        required=True
-    )
-
-    def __init__(self, view):
-        super().__init__()
+class VaultGuessModal(discord.ui.Modal):
+    def __init__(self, view: "VaultGameView"):
+        super().__init__(title="🔢 Enter Vault Code")
         self.view = view
 
+        self.guess = discord.ui.TextInput(
+            label="Enter a 3-digit code",
+            max_length=3,
+            required=True
+        )
+        self.add_item(self.guess)
+
     async def on_submit(self, interaction: discord.Interaction):
-        result = self.view.game.check_guess(self.guess.value)
-
-        await interaction.response.defer(ephemeral=True)
-
-        # SUCCESS
-        if result == "unlocked":
-            self.view.outcome = "success"
-            cash, xp = await apply_success_rewards(interaction, self.view.user_id)
-
-            await self.view.channel.send(
-                embed=discord.Embed(
-                    title="🔓 Vault Cracked",
-                    description=(
-                        f"💰You made off with **${cash/100:,.2f}**.\n"
-                        f"📈XP Bonus: {xp}"
-                    ),
-                    color=discord.Color.green()
+        try:
+            if self.view.has_snitched or self.view.snitch_disabled:
+                return await interaction.response.send_message(
+                    "Someone snitched. The vault is locked down. You can't enter the code anymore.",
+                    ephemeral=True
                 )
-            )
 
-            # --- CRIME LOGGING: SUCCESSFUL ROBBERY ---
-            pool = get_pool()
-            company_name, occupation_name = await get_user_company(self.view.guild_id, self.view.user_id)
+            result = self.view.game.check_guess(self.guess.value)
 
-            await log_crime(
-                guild_id=self.view.guild_id,
-                perpetrator_id=self.view.user_id,
-                crime_type="vault robbery",
-                crime_description=f"Successful vault robbery at {company_name}",
-                clue_description=None,      # UPDATED
-                evidence_list=[],           # UPDATED
-                status="unsolved",
-                location=company_name
-            )
+            await interaction.response.defer(ephemeral=True)
 
-            self.view.robbery_complete.set()
-            self.view.stop()
-            return
+            if result == "unlocked":
+                self.view.outcome = "success"
+                cash, xp = await self.view.apply_success_rewards(interaction)
 
-        # LOCKED OUT → POLICE ITEM CHOICE FIRST
-        if result == "locked_out":
-            self.view.outcome = "failure"
-            await self.view.start_police_item_choice(interaction)
-            return
+                await self.view.channel.send(
+                    embed=discord.Embed(
+                        title="💰 Vault Cracked",
+                        description=(
+                            f"You made off with **${cash/100:,.2f}**.\n"
+                            f"XP Bonus: {xp}"
+                        ),
+                        color=discord.Color.green()
+                    )
+                )
 
-        # FEEDBACK
-        await self.view.channel.send(result)
+                self.view.controller.stolen_amount = cash
+                await self.view.controller.log_success_crime()
+
+                self.view.stop()
+                return
+
+            elif result == "locked_out":
+                self.view.outcome = "failure"
+
+                await self.view.channel.send(
+                    embed=discord.Embed(
+                        title="🚨 Vault Locked Out",
+                        description="You failed to crack the vault. The police may get involved.",
+                        color=0xF04747,
+                    )
+                )
+
+                user_items = await self.view.controller.get_user_items()
+                police_view = PoliceItemView(self.view.controller, user_items)
+
+                msg = await self.view.channel.send(
+                    "⚠️ Choose your move! You have 20 seconds before the police leave the station!:",
+                    view=police_view
+                )
+
+                await police_view.wait_for_choice()
+
+                if police_view.selected_option == "chance":
+                    await self.view.channel.send(
+                        embed=discord.Embed(
+                            title="🚨 The police arrived at the scene of the crime!",
+                            description="They rush in with sirens blaring!",
+                            color=0xE74C3C
+                        )
+                    )
+                    await asyncio.sleep(3)
+
+                await police_view.finalize_choice(interaction)
+
+                self.view.stop()
+                return
+
+            else:
+                await self.view.channel.send(result)
+
+        except Exception as e:
+            logger.exception("VaultGuessModal.on_submit crashed")
+            try:
+                await interaction.followup.send(
+                    "❌ Error processing your vault guess.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
 
 
 class VaultGameView(discord.ui.View):
-    """
-    Main controller for the BreakJob robbery minigame.
-    """
-
-    def __init__(self, user_id: int, bot, channel: discord.TextChannel):
-        super().__init__(timeout=120)
-
+    def __init__(self, user_id, bot, channel, guild_id):
+        super().__init__(timeout=60)
         self.user_id = user_id
         self.bot = bot
         self.channel = channel
-        self.guild_id = channel.guild.id
+        self.guild_id = guild_id
 
         self.game = VaultGame()
-
-        self.snitched = False
-        self.snitcher_id = None
-
-        self.hide_spot_chosen = False
-        self.chosen_spot = None
-
         self.outcome = None
-        self.robbery_complete = asyncio.Event()
 
-        # NEW FLAGS
-        self.smoke_bomb_used = False
-        self.corrupt_cop_used = False
+        self.controller = PoliceFlowController(
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            channel=self.channel,
+            crime_type="vault",
+            stolen_amount=None,
+            company_name=None,
+        )
 
-        # 12 hiding spots
-        self.hide_spots = [
-            ("🗄️", "behind the storage shelves"),
-            ("🧺", "inside the supply closet"),
-            ("🪑", "under the desk"),
-            ("🛠️", "in the maintenance room"),
-            ("📦", "behind the delivery crates"),
-            ("🚪", "inside the loading dock"),
-            ("📦", "under a pile of boxes"),
-            ("🧥", "behind the office curtains"),
-            ("🗑️", "inside the trash bin"),
-            ("🔥", "in the boiler room"),
-            ("🧣", "behind the coat rack"),
-            ("🌬️", "inside the ventilation duct"),
-        ]
+        self.snitch_disabled = False
+        self.has_snitched = False
 
-    # ------------------------------------------------------------
-    # BUTTONS
-    # ------------------------------------------------------------
+    async def apply_success_rewards(self, interaction):
+        try:
+            pool = get_pool()
 
-    @discord.ui.button(label="Enter Code", style=discord.ButtonStyle.green)
-    async def enter_code(self, interaction: discord.Interaction, button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message(
-                "This isn't your robbery.", ephemeral=True
-            )
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    SELECT o.wage_per_shift, o.xp_per_shift
+                    FROM user_occupations uo
+                    JOIN cd_occupations o ON o.cd_occupation_id = uo.cd_occupation_id
+                    WHERE uo.discord_id = $1
+                      AND uo.guild_id = $2
+                      AND uo.employment_end_date IS NULL
+                """, self.user_id, interaction.guild.id)
 
-        await interaction.response.send_modal(VaultGuessModal(self))
+                if not row:
+                    await interaction.channel.send("⚠ Error: Could not determine your occupation rewards.")
+                    return 0, 0
+
+                wage = row["wage_per_shift"]
+                xp_per = row["xp_per_shift"]
+
+                cash = wage * random.randint(100, 150)
+                xp = xp_per * random.randint(10, 15)
+
+                await conn.execute("""
+                    UPDATE users
+                    SET checking_account_balance = checking_account_balance + $1,
+                        xp = xp + $2
+                    WHERE discord_id = $3 AND guild_id = $4
+                """, cash, xp, self.user_id, interaction.guild.id)
+
+            return cash, xp
+
+        except Exception:
+            logger.exception("apply_success_rewards crashed")
+            return 0, 0
+
+    @discord.ui.button(label="Enter Safe Code", style=discord.ButtonStyle.blurple)
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.has_snitched or self.snitch_disabled:
+                return await interaction.response.send_message(
+                    "Someone snitched. The vault is locked down. You can't enter the code anymore.",
+                    ephemeral=True
+                )
+
+            if interaction.user.id != self.user_id:
+                return await interaction.response.send_message(
+                    "This isn't your vault to crack!",
+                    ephemeral=True
+                )
+
+            await interaction.response.send_modal(VaultGuessModal(self))
+
+        except Exception:
+            logger.exception("Enter Safe Code button crashed")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "❌ Something went wrong opening the vault code modal.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(
+                        "❌ Something went wrong opening the vault code modal.",
+                        ephemeral=True
+                    )
+            except Exception:
+                pass
 
     @discord.ui.button(label="Snitch", style=discord.ButtonStyle.red)
-    async def snitch(self, interaction: discord.Interaction, button):
-        await handle_snitch(self, interaction)
+    async def snitch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
 
-    # ------------------------------------------------------------
-    # POLICE ITEM CHOICE
-    # ------------------------------------------------------------
-
-    async def start_police_item_choice(self, interaction):
-        """
-        Called when:
-        - vault fails (locked_out)
-        - snitch confirmed (no intimidation)
-        BEFORE hide sequence.
-        """
-
-        # 1. Police Alert Message
-        if not self.snitched:
-            await self.channel.send(
-                embed=discord.Embed(
-                    title="🚨 Police Alerted!",
-                    description="The police are on their way!",
-                    color=0xF04747
+            if interaction.user.id == self.user_id:
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="🤦 Are You the Dumbest Criminal Alive?",
+                        description=(
+                            "You can't snitch on yourself.\n"
+                            "That's not how crime — or common sense — works."
+                        ),
+                        color=0xF04747
+                    ),
+                    ephemeral=True
                 )
+
+            if self.has_snitched or self.snitch_disabled:
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="🕵️‍♂️ Too Late",
+                        description="Snitching is no longer available.",
+                        color=0x747F8D
+                    ),
+                    ephemeral=True
+                )
+
+            self.has_snitched = True
+            self.snitch_disabled = True
+
+            button.disabled = True
+            for child in self.children:
+                if isinstance(child, discord.ui.Button) and child.label == "Enter Safe Code":
+                    child.disabled = True
+
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                logger.exception("Failed to edit message to disable buttons after snitch")
+
+            blocked = await handle_universal_snitch(self.controller, interaction, interaction.user.id)
+
+            if blocked:
+                return
+
+            user_items = await self.controller.get_user_items()
+            police_view = PoliceItemView(self.controller, user_items)
+
+            msg = await self.channel.send(
+                "⚠️ Choose your move! You have 20 seconds to decide before the police leave the station!:",
+                view=police_view
             )
 
-        # 2. Fetch user items
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT item_id, quantity
-                FROM user_items
-                WHERE discord_id = $1 AND guild_id = $2
-            """, self.user_id, self.guild_id)
+            await police_view.wait_for_choice()
 
-        user_items = {row["item_id"]: row["quantity"] for row in rows}
-
-        # 3. Show item choice UI
-        view = PoliceItemView(self, user_items)
-        msg = await self.channel.send(
-            embed=discord.Embed(
-                title="⚠️ Choose Your Move",
-                description="The police are closing in. Make your choice.",
-                color=0xE67E22
-            ),
-            view=view
-        )
-
-        # 4. Wait for choice or timeout
-        await view.choice_made.wait()
-
-        # 5. Branch based on choice
-        if view.selected_option == "corrupt":
-            self.outcome = "success"
-            self.robbery_complete.set()
-
-            await asyncio.sleep(5)
-
-            await self.channel.send(
-                embed=discord.Embed(
-                    title="🍩 You Escaped!",
-                    description="Your cop contact brought in donuts just as the police were about to leave. This crime will not be reported.\nYou escaped safely.",
-                    color=0x2ECC71
+            if police_view.selected_option == "chance":
+                await self.channel.send(
+                    embed=discord.Embed(
+                        title="🚨 The police are en route to the scene of the crime!",
+                        description="They grab a donut for the road!",
+                        color=0xE74C3C
+                    )
                 )
-            )
+                await asyncio.sleep(3)
+
+            await police_view.finalize_choice(interaction)
 
             self.stop()
-            return
 
-        # Smoke Bomb or Take My Chances → continue to hide UI
-        await self.start_hide_sequence(interaction)
-
-    # ------------------------------------------------------------
-    # HIDE SEQUENCE
-    # ------------------------------------------------------------
-
-    async def start_hide_sequence(self, interaction):
-        await self.channel.send(
-            "Choose a hiding spot before the police arrive!",
-            view=HideOnlyView(self)
-        )
-
-        asyncio.create_task(self.handle_hide_timeout())
-
-    async def handle_hide_timeout(self):
-        await asyncio.sleep(10)
-
-        if self.hide_spot_chosen or self.robbery_complete.is_set():
-            return
-
-        # No hide chosen → automatic arrest
-        self.chosen_spot = None
-
-        # --- CRIME LOGGING: TIMEOUT ARREST ---
-        company_name, occupation_name = await get_user_company(self.guild_id, self.user_id)
-
-        await log_crime(
-            guild_id=self.guild_id,
-            perpetrator_id=self.user_id,
-            crime_type="vault robbery",
-            crime_description=f"Vault robbery attempt at {company_name}",
-            clue_description=None,      # UPDATED
-            evidence_list=[],           # UPDATED
-            status="solved",
-            location=company_name
-        )
-
-        await handle_police_outcome(self, None, None)
-
-    # ------------------------------------------------------------
-    # POLICE SEARCH
-    # ------------------------------------------------------------
-
-    async def trigger_police_search(self, interaction, spot):
-        if self.robbery_complete.is_set():
-            return
-
-        await asyncio.sleep(5)
-
-        # Smoke Bomb guarantees escape
-        if self.smoke_bomb_used:
-            self.outcome = "success"
-            self.robbery_complete.set()
-
-            await self.channel.send(
-                embed=discord.Embed(
-                    title="💨 Criminal Escaped!",
-                    description="The police didn’t bring their gas masks and left. The thief escaped.",
-                    color=0x2ECC71
-                )
-            )
-
-            # --- CRIME LOGGING: SMOKE BOMB ESCAPE ---
-            company_name, occupation_name = await get_user_company(self.guild_id, self.user_id)
-
-            await log_crime(
-                guild_id=self.guild_id,
-                perpetrator_id=self.user_id,
-                crime_type="vault robbery",
-                crime_description=f"Smoke bomb escape from {company_name}",
-                clue_description=None,      # UPDATED
-                evidence_list=[],           # UPDATED
-                status="unsolved",
-                location=company_name
-            )
-
-            return
-
-        # Otherwise normal police search
-        await handle_police_outcome(self, interaction, spot)
-
-    # ------------------------------------------------------------
-    # TIMEOUT
-    # ------------------------------------------------------------
+        except Exception:
+            logger.exception("Snitch button crashed")
 
     async def on_timeout(self):
-        if not self.robbery_complete.is_set():
-            await self.channel.send("⏳ The robbery timed out.")
+        try:
+            if self.has_snitched or self.snitch_disabled:
+                return
+
+            if self.channel:
+                await self.channel.send(
+                    embed=discord.Embed(
+                        title="⏳ Timeout or Abandoned",
+                        description="You gave up or the game timed out.",
+                        color=0x747F8D,
+                    )
+                )
+        except Exception:
+            logger.exception("on_timeout crashed")
+
         self.stop()
+
+    async def disable_snitch_button_later(self, message: discord.Message):
+        try:
+            await discord.utils.sleep_until(datetime.utcnow() + timedelta(seconds=10))
+
+            if not self.has_snitched:
+                self.snitch_disabled = True
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button) and child.label == "Snitch":
+                        child.disabled = True
+
+                await message.edit(view=self)
+
+        except Exception:
+            logger.exception("disable_snitch_button_later crashed")

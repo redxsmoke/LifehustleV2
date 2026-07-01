@@ -3,11 +3,9 @@ import logging
 from db.connection import get_pool
 from datetime import datetime, timedelta
 
-# ⭐ LOGGER FOR GTA ERRORS
 logger = logging.getLogger("crime.gtaerrors")
 logger.setLevel(logging.ERROR)
 
-# GTA cooldown (currently 0 hours)
 COOLDOWN_HOURS = 0
 GTA_COOLDOWN = timedelta(hours=COOLDOWN_HOURS)
 
@@ -97,8 +95,7 @@ class GTASelectVictimModal(discord.ui.Modal, title="Select a Car Theft Victim"):
 
                 if victim.id == interaction.user.id:
                     await interaction.response.send_message(
-                        "🧠 You are dumber than SpongeBob and Patrick on free balloon day.\n\n"
-                        "🚗 It's not a crime to steal **your own car**.",
+                        "🧠 You cannot steal your own car.",
                         ephemeral=True
                     )
                     return
@@ -206,8 +203,7 @@ class GTAVictimSelect(discord.ui.Select):
 
             if victim.id == interaction.user.id:
                 await interaction.response.send_message(
-                    "🧠 You are dumber than SpongeBob and Patrick on free balloon day.\n\n"
-                    "🚗 It's not a crime to steal **your own car**.",
+                    "🧠 You cannot steal your own car.",
                     ephemeral=True
                 )
                 return
@@ -338,41 +334,45 @@ class TheftLocationDropdown(discord.ui.Select):
                     ephemeral=True
                 )
 
+            # ⭐ UPDATED: Starting Robbery embed
+            embed = discord.Embed(
+                title="🔐 Starting Robbery",
+                description=(
+                    "**Vault Heist Rules:**\n"
+                    "• **✅** Correct number in the correct position\n"
+                    "• **⚠️** Correct number in the wrong position\n"
+                    "• **❌** Number not in the code\n\n"
+                    "Crack the 3‑digit safe code.\n"
+                    "You have **5 attempts**.\n"
+                    "Snitching may occur.\n"
+                    "Police may respond.\n"
+                ),
+                color=discord.Color.blurple()
+            )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            # ⭐ FIXED: Call robbery logic WITHOUT responding again
             cog = self.parent_view.bot.get_cog("CrimeCommands")
             if cog:
                 try:
                     await cog.handle_rob_job(interaction)
                 except Exception as e:
                     print(f"❌ Error in handle_rob_job: {e}")
-                    try:
-                        if not interaction.response.is_done():
-                            await interaction.response.send_message(
-                                embed=discord.Embed(
-                                    title="❌ Robbery Failed",
-                                    description="Something went wrong during the robbery attempt.",
-                                    color=discord.Color.red()
-                                ),
-                                ephemeral=True
-                            )
-                        else:
-                            await interaction.followup.send(
-                                embed=discord.Embed(
-                                    title="❌ Robbery Failed",
-                                    description="Something went wrong during the robbery attempt.",
-                                    color=discord.Color.red()
-                                ),
-                                ephemeral=True
-                            )
-                    except Exception as inner_e:
-                        print(f"❌ Failed to send error message: {inner_e}")
+                    await interaction.channel.send(
+                        embed=discord.Embed(
+                            title="❌ Robbery Failed",
+                            description="Something went wrong during the robbery attempt.",
+                            color=discord.Color.red()
+                        )
+                    )
             else:
-                await interaction.response.send_message(
+                await interaction.channel.send(
                     embed=discord.Embed(
                         title="⚠️ Crime System Unavailable",
                         description="Crime system is not available right now. Please try again later.",
                         color=discord.Color.orange()
-                    ),
-                    ephemeral=True
+                    )
                 )
 
         elif location == "Grand Theft Auto":

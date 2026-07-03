@@ -1,14 +1,15 @@
 import asyncio
 import discord
+import logging
 
 from db.connection import get_pool  
-
 from .hide_locations import HIDE_SPOTS
 from .hide_engine import start_hide_sequence, process_police_search
 from .intimidation_engine import process_snitch
-
-# Arrest consequence handler
 from police.police_reported_logic.police_rewards import apply_police_consequences
+
+logger = logging.getLogger("crime.policeflow")
+logger.setLevel(logging.ERROR)
 
 
 CRIME_CONFIG = {
@@ -23,7 +24,7 @@ CRIME_CONFIG = {
         "hide_spots": "vault",
     },
 
-    "gta": {
+    "grand_theft_auto": {
         "use_padlock": False,
         "use_bail": False,
         "use_criminal_record": False,
@@ -31,23 +32,15 @@ CRIME_CONFIG = {
         "use_money_seizure": False,
         "use_smoke_bomb": True,
         "use_corrupt_cop": True,
-        "hide_spots": "gta",
+        "hide_spots": "grand_theft_auto",
     },
 }
 
 
 class PoliceFlowController:
-    def __init__(
-        self,
-        user_id: int,
-        guild_id: int,
-        channel: discord.TextChannel,
-        crime_type: str,
-        stolen_amount: int | None = None,
-        company_name: str | None = None,
-        car_id: int | None = None,
-        stolen_value: int | None = None,
-    ):
+    def __init__(self, user_id, guild_id, channel, crime_type,
+                 stolen_amount=None, company_name=None, car_id=None, stolen_value=None):
+
         self.user_id = user_id
         self.guild_id = guild_id
         self.channel = channel
@@ -72,27 +65,6 @@ class PoliceFlowController:
     def get_config(self):
         return CRIME_CONFIG.get(self.crime_type, {})
 
-    def uses_padlock(self):
-        return bool(self.get_config().get("use_padlock"))
-
-    def uses_bail(self):
-        return bool(self.get_config().get("use_bail"))
-
-    def uses_criminal_record(self):
-        return bool(self.get_config().get("use_criminal_record"))
-
-    def uses_employment_firing(self):
-        return bool(self.get_config().get("use_employment_firing"))
-
-    def uses_money_seizure(self):
-        return bool(self.get_config().get("use_money_seizure"))
-
-    def uses_smoke_bomb(self):
-        return bool(self.get_config().get("use_smoke_bomb"))
-
-    def uses_corrupt_cop(self):
-        return bool(self.get_config().get("use_corrupt_cop"))
-
     def get_hide_spots(self):
         key = self.get_config().get("hide_spots")
         if not key:
@@ -102,55 +74,143 @@ class PoliceFlowController:
     async def start_hide(self, interaction):
         await start_hide_sequence(self, interaction)
 
+    # ============================================================
+    # CRIME LOGGING
+    # ============================================================
+    async def log_unsolved_crime(self):
+        try:
+            pool = get_pool()
+            async with pool.acquire() as conn:
+
+                next_id = await conn.fetchval("SELECT COALESCE(MAX(crime_id), 0) + 1 FROM police_crimes")
+
+                company_name = await conn.fetchval("""
+                    SELECT cd_o.company_name
+                    FROM user_occupations uo
+                    JOIN cd_occupations cd_o ON cd_o.cd_occupation_id = uo.cd_occupation_id
+                    WHERE uo.discord_id = $1 AND uo.guild_id = $2 AND uo.employment_end_date IS NULL
+                """, self.user_id, self.guild_id)
+
+                await conn.execute("""
+                    INSERT INTO police_crimes
+                    (crime_id, guild_id, perpetrator_id, crime_type, crime_description,
+                     timestamp, status, location)
+                    VALUES ($1,$2,$3,$4,$5,NOW(),$6,$7)
+                """,
+                next_id, self.guild_id, self.user_id,
+                "Robbery", "Theft of business funds", "Unsolved", company_name)
+
+        except Exception as e:
+            await self.channel.send(f"ERROR: log_unsolved_crime → {e}")
+
+    async def log_solved_crime(self):
+        try:
+            pool = get_pool()
+            async with pool.acquire() as conn:
+
+                next_id = await conn.fetchval("SELECT COALESCE(MAX(crime_id), 0) + 1 FROM police_crimes")
+
+                company_name = await conn.fetchval("""
+                    SELECT cd_o.company_name
+                    FROM user_occupations uo
+                    JOIN cd_occupations cd_o ON cd_o.cd_occupation_id = uo.cd_occupation_id
+                    WHERE uo.discord_id = $1 AND uo.guild_id = $2 AND uo.employment_end_date IS NULL
+                """, self.user_id, self.guild_id)
+
+                await conn.execute("""
+                    INSERT INTO police_crimes
+                    (crime_id, guild_id, perpetrator_id, crime_type, crime_description,
+                     timestamp, status, location)
+                    VALUES ($1,$2,$3,$4,$5,NOW(),$6,$7)
+                """,
+                next_id, self.guild_id, self.user_id,
+                "Robbery", "Theft of business funds", "Solved", company_name)
+
+        except Exception as e:
+            await self.channel.send(f"ERROR: log_solved_crime → {e}")
+
+    # ============================================================
+    # POLICE SEARCH HANDLING
+    # ============================================================
     async def trigger_police_search(self, interaction, chosen_spot):
-        # Run police search
-        caught = await process_police_search(self, interaction, chosen_spot)
+        try:
+            caught = await process_police_search(self, interaction, chosen_spot)
 
-        # DEBUG: show whether caught or not
-        await self.channel.send(f"DEBUG: trigger_police_search → caught={caught} user={self.user_id}")
-
-        if caught:
-            try:
+            if caught:
                 await apply_police_consequences(self)
-                await self.channel.send(f"DEBUG: apply_police_consequences SUCCESS user={self.user_id}")
-            except Exception as e:
-                await self.channel.send(f"DEBUG: apply_police_consequences ERROR user={self.user_id} → {e}")
+                await self.log_solved_crime()
+            else:
+                await self.log_unsolved_crime()
+
+        except Exception as e:
+            await self.channel.send(f"ERROR: trigger_police_search → {e}")
 
     async def handle_hide_timeout(self):
-        caught = await process_police_search(self, None, None)
-
-        await self.channel.send(f"DEBUG: handle_hide_timeout → caught={caught} user={self.user_id}")
-
-        if caught:
+        if not self.hide_spot_chosen:
             try:
                 await apply_police_consequences(self)
-                await self.channel.send(f"DEBUG: timeout apply_police_consequences SUCCESS user={self.user_id}")
+                await self.log_solved_crime()
             except Exception as e:
-                await self.channel.send(f"DEBUG: timeout apply_police_consequences ERROR user={self.user_id} → {e}")
+                await self.channel.send(f"ERROR: handle_hide_timeout auto → {e}")
+            return
+
+        try:
+            caught = await process_police_search(self, None, None)
+
+            if caught:
+                await apply_police_consequences(self)
+                await self.log_solved_crime()
+            else:
+                await self.log_unsolved_crime()
+
+        except Exception as e:
+            await self.channel.send(f"ERROR: handle_hide_timeout → {e}")
 
     async def handle_snitch(self, interaction, snitcher_id):
         try:
-            blocked = await process_snitch(self, interaction, snitcher_id)
-            await self.channel.send(f"DEBUG: handle_snitch → blocked={blocked} snitcher={snitcher_id} user={self.user_id}")
-            return blocked
+            logger.error(f"[POLICE] Starting police flow for user={self.user_id}, guild={self.guild_id}, type={self.crime_type}")
+
+            # ⭐ LOG CRIME LOADING
+            logger.error(f"[POLICE] Loading crime for user={self.user_id}, guild={self.guild_id}, type={self.crime_type}")
+
+            # ⭐ GTA CRIME IS NEVER LOADED — THIS WILL SHOW UP
+            # (We will fix this once we see the logs)
+            crime = None
+
+            if not crime:
+                logger.error(f"[POLICE] NO CRIME FOUND for user={self.user_id}, guild={self.guild_id}, type={self.crime_type}")
+            else:
+                logger.error(f"[POLICE] CRIME LOADED: {crime}")
+
+            # Run snitch logic
+            result = await process_snitch(self, interaction, snitcher_id)
+
+            logger.error(f"[POLICE] Finished police flow for user={self.user_id}")
+
+            return result
+
         except Exception as e:
-            await self.channel.send(f"DEBUG: handle_snitch ERROR user={self.user_id} → {e}")
+            logger.exception(f"[POLICE] ERROR in handle_snitch → {e}")
+            await self.channel.send(f"ERROR: handle_snitch → {e}")
 
     async def get_user_items(self):
         try:
             pool = get_pool()
             async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
+                rows = await conn.fetch("""
                     SELECT item_id, quantity
                     FROM user_items
                     WHERE discord_id = $1 AND guild_id = $2
-                    """,
-                    self.user_id,
-                    self.guild_id,
-                )
+                """, self.user_id, self.guild_id)
 
             return {row["item_id"]: row["quantity"] for row in rows}
 
-        except Exception as e:
+        except Exception:
             return {}
+
+    def stop(self):
+        try:
+            if not self.robbery_complete.is_set():
+                self.robbery_complete.set()
+        except:
+            pass

@@ -20,10 +20,21 @@ class HideButton(discord.ui.Button):
         self.controller.hide_spot_chosen = True
         self.controller.chosen_spot = self.spot
 
+        # ⭐ UPDATED: Embedded hide message
         await interaction.response.send_message(
-            f"You hid **{self.spot}**. The police are on their way...",
+            embed=discord.Embed(
+                title=f"🫣 You hid {self.spot}",
+                description="The police are on their way...",
+                color=0x3498DB
+            ),
             ephemeral=True
         )
+
+        # ⭐ FIX: Disable hide buttons immediately so user cannot click twice
+        try:
+            await interaction.message.edit(view=None)
+        except Exception:
+            pass
 
         await process_police_search(self.controller, interaction, self.spot)
 
@@ -43,16 +54,44 @@ async def start_hide_sequence(controller, interaction):
     controller.hide_spot_chosen = False
     controller.chosen_spot = None
 
-    await controller.channel.send(
-        "Choose a hiding spot before the police arrive!",
+    hide_message = await controller.channel.send(
+        embed=discord.Embed(
+            title="🫣 Available Hiding Locations",
+            description="Choose a hiding spot before the police arrive!",
+            color=0x3498DB
+        ),
         view=HideOnlyView(controller)
     )
 
-    asyncio.create_task(hide_timeout(controller, interaction))
+    asyncio.create_task(hide_timeout(controller, hide_message))
 
 
-async def hide_timeout(controller, interaction):
+    asyncio.create_task(hide_timeout(controller, hide_message))
+
+
+async def hide_timeout(controller, hide_message):
     await asyncio.sleep(10)
+
+    if controller.hide_spot_chosen or controller.robbery_complete.is_set():
+        return
+
+    try:
+        await controller.channel.send(
+            embed=discord.Embed(
+                title="🚨 Police have arrived!",
+                description="The officers rush in and begin searching the area.",
+                color=0xF04747,
+            )
+        )
+    except Exception:
+        pass
+
+    try:
+        await hide_message.edit(view=None)
+    except Exception:
+        pass
+
+    await asyncio.sleep(3)
 
     if controller.hide_spot_chosen or controller.robbery_complete.is_set():
         return
@@ -83,7 +122,7 @@ async def hide_timeout(controller, interaction):
             else:
                 desc = (
                     "You stood there looking like an idiot! The police arrested you and "
-                    "seized your checking account funds for investigation."
+                    "seized your checking_account funds for investigation."
                 )
 
             await controller.channel.send(
@@ -111,6 +150,11 @@ async def hide_timeout(controller, interaction):
             )
 
         await set_bail_for_user(controller.user_id, controller.guild_id)
+
+        try:
+            await controller.log_solved_crime()
+        except Exception:
+            pass
 
     except Exception:
         pass
@@ -206,6 +250,11 @@ async def process_police_search(controller, interaction, chosen_spot):
 
             await set_bail_for_user(controller.user_id, controller.guild_id)
 
+            try:
+                await controller.log_solved_crime()
+            except Exception:
+                pass
+
         except Exception:
             pass
 
@@ -220,6 +269,11 @@ async def process_police_search(controller, interaction, chosen_spot):
                     color=0x2ECC71
                 )
             )
+        except Exception:
+            pass
+
+        try:
+            await controller.log_unsolved_crime()
         except Exception:
             pass
 

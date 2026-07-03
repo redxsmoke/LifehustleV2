@@ -15,7 +15,6 @@ logger.setLevel(logging.DEBUG)
 
 class ClueScheduler(commands.Cog):
     def __init__(self, bot, *, test_mode: bool = False):
-        logger.warning("🔥 [ClueScheduler] __init__ CALLED")
         self.bot = bot
         self.test_mode = test_mode
 
@@ -74,7 +73,7 @@ class ClueScheduler(commands.Cog):
     async def clue_loop(self):
         now_utc = discord.utils.utcnow().replace(tzinfo=ZoneInfo("UTC"))
         est = now_utc.astimezone(ZoneInfo("America/New_York"))
-        logger.warning(f"🔥 [ClueScheduler] now_utc={now_utc}, est={est}")
+
 
         # ------------------------------------------------------------
         # TEST MODE

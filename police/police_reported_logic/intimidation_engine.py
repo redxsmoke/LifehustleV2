@@ -13,7 +13,7 @@ async def process_snitch(controller, interaction: discord.Interaction, snitcher_
         pool = get_pool()
         async with pool.acquire() as conn:
 
-            # ⭐ FIXED: intimidation item is ID 15 (NOT 14)
+            # Intimidation item is ID 15
             intimidation_row = await conn.fetchrow("""
                 SELECT quantity
                 FROM user_items
@@ -30,27 +30,29 @@ async def process_snitch(controller, interaction: discord.Interaction, snitcher_
                     WHERE discord_id = $1 AND guild_id = $2 AND item_id = 15
                 """, controller.user_id, controller.guild_id)
 
-                # Intimidation triggers
+                # Build intimidation message
                 snitch_user = interaction.guild.get_member(snitcher_id)
                 snitch_name = snitch_user.mention if snitch_user else "Unknown"
 
-                # ⭐ FIXED: consume interaction so Snitch button doesn't fail
-                await interaction.response.send_message(
+                # ⭐ FIX: Send PUBLIC message to the robbery channel
+                await controller.channel.send(
                     embed=discord.Embed(
                         title="👁️ Intimidation Activated!",
                         description=(
-                            "Your snitch got cold feet and called off the police.\n"
-                            "**You're not done yet. Keep cracking the vault code!**\n\n"
+                            "The snitch got cold feet and called off the police.\n"
+                            "**Get out of there before someone else spots you!**\n\n"
                             f"**Snitch:** {snitch_name}"
                         ),
                         color=0x9B59B6
-                    ),
-                    ephemeral=True
+                    )
                 )
 
-                return True  # blocked
+                # ⭐ IMPORTANT: DO NOT respond to the interaction here
+                # The main snitch flow will continue safely.
 
-        return False  # snitch succeeds normally
+                return True  # intimidation blocked the snitch
+
+        return False  # no intimidation item → snitch succeeds normally
 
     except Exception as e:
         logger.exception("Error in process_snitch: %s", e)

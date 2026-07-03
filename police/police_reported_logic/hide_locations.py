@@ -22,7 +22,7 @@ HIDE_SPOTS = {
     # ------------------------------------------------------------
     # GTA (ALL STAGES)
     # ------------------------------------------------------------
-    "gta": [
+    "grand_theft_auto": [
         ("🌳", "behind the backyard tree"),
         ("🚗", "behind the parked car in the driveway"),
         ("🗑️", "behind the trash bins"),

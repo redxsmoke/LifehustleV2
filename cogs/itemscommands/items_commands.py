@@ -47,6 +47,168 @@ class Items(commands.Cog):
         ]
 
     # ============================================================
+    # NEW UI SELECT — ITEM TYPE FILTER
+    # ============================================================
+    class ItemTypeSelect(discord.ui.Select):
+        def __init__(self, current_filter: str):
+            options = [
+                discord.SelectOption(label="All", value="all"),
+                discord.SelectOption(label="Consumable", value="consumable"),
+                discord.SelectOption(label="Reward", value="reward"),
+                discord.SelectOption(label="Tool", value="tool"),
+                discord.SelectOption(label="Badge", value="badge"),
+            ]
+
+            super().__init__(
+                placeholder="Filter items by type",
+                min_values=1,
+                max_values=1,
+                options=options,
+            )
+
+            for opt in self.options:
+                if opt.value == current_filter:
+                    opt.default = True
+
+        async def callback(self, interaction: discord.Interaction):
+            view: "ItemsView" = self.view  # type: ignore
+
+            if interaction.user.id != view.user.id:
+                return await interaction.response.send_message(
+                    "⛔ This menu is not for you.",
+                    ephemeral=True
+                )
+
+            view.type_filter = self.values[0]
+            view.page = 0
+            await view.refresh(interaction)
+
+    # ============================================================
+    # NEW UI VIEW — LOTTERY STYLE
+    # ============================================================
+    class ItemsView(discord.ui.View):
+        def __init__(self, bot, user, guild_id, sort):
+            super().__init__(timeout=300)
+            self.bot = bot
+            self.user = user
+            self.guild_id = guild_id
+            self.sort = sort
+            self.type_filter = "all"
+            self.page = 0
+            self.per_page = 10
+            self.rows = []
+
+            # Dropdown ABOVE pagination (Option 1)
+            self.add_item(Items.ItemTypeSelect(self.type_filter))
+
+        async def fetch_items(self):
+            try:
+                async with self.bot.db.acquire(timeout=2) as conn:
+                    base_sql = """
+                        SELECT ui.item_id, ui.quantity, ci.*
+                        FROM user_items ui
+                        JOIN cd_items ci ON ci.item_id = ui.item_id
+                        WHERE ui.discord_id = $1
+                        AND ui.guild_id = $2
+                        AND ci.is_active = TRUE
+                    """
+
+                    params = [self.user.id, self.guild_id]
+
+                    if self.type_filter != "all":
+                        base_sql += " AND LOWER(ci.type) = LOWER($3)"
+                        params.append(self.type_filter)
+
+                    rows = await conn.fetch(base_sql, *params)
+                    self.rows = rows
+
+            except Exception as e:
+                log.error(f"[ItemsView.fetch_items] {e}")
+                self.rows = []
+
+        def sort_items(self):
+            try:
+                if self.sort == "name":
+                    self.rows = sorted(self.rows, key=lambda r: r["name"])
+                elif self.sort == "type":
+                    self.rows = sorted(self.rows, key=lambda r: r["type"])
+                else:
+                    rarity_order = {"Common": 1, "Uncommon": 2, "Rare": 3, "Epic": 4, "Legendary": 5}
+                    self.rows = sorted(self.rows, key=lambda r: rarity_order.get(r["rarity"], 0), reverse=True)
+            except Exception as e:
+                log.error(f"[ItemsView.sort_items] {e}")
+
+        def get_page_items(self):
+            start = self.page * self.per_page
+            end = start + self.per_page
+            return self.rows[start:end]
+
+        def build_embed(self):
+            embed = discord.Embed(
+                title="🎒 Your Active Items",
+                description=f"Sorted by **{self.sort.capitalize()}** | Filter: **{self.type_filter.capitalize()}**",
+                color=discord.Color.blurple()
+            )
+
+            page_items = self.get_page_items()
+
+            if not page_items:
+                embed.description = "📭 You have no items in this category."
+                return embed
+
+            text = ""
+
+            for item in page_items:
+                icon = item["icon_path"]
+                if is_valid_url(icon):
+                    icon_prefix = f"[⠀]({icon})"
+                else:
+                    icon_prefix = RARITY_COLORS.get(item["rarity"], "⬜")
+
+                text += f"{icon_prefix} **{item['name']} ×{item['quantity']}**\n"
+                text += f"{item['description']}\n\n"
+
+            embed.description = text.strip()
+            return embed
+
+        async def refresh(self, interaction: discord.Interaction):
+            await self.fetch_items()
+            self.sort_items()
+
+            # Remove old dropdown and re-add fresh one
+            for item in list(self.children):
+                if isinstance(item, Items.ItemTypeSelect):
+                    self.remove_item(item)
+
+            self.add_item(Items.ItemTypeSelect(self.type_filter))
+
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self
+            )
+
+        @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+        async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != self.user.id:
+                return await interaction.response.send_message("⛔ Not allowed.", ephemeral=True)
+
+            if self.page > 0:
+                self.page -= 1
+
+            await self.refresh(interaction)
+
+        @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+        async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != self.user.id:
+                return await interaction.response.send_message("⛔ Not allowed.", ephemeral=True)
+
+            max_page = max(0, (len(self.rows) - 1) // self.per_page)
+            if self.page < max_page:
+                self.page += 1
+
+            await self.refresh(interaction)
+
+    # ============================================================
     # /items COMMAND
     # ============================================================
     @app_commands.command(name="items", description="View your items, item info, or search items.")
@@ -71,7 +233,16 @@ class Items(commands.Cog):
 
         try:
             if action.value == "my":
-                await self.show_my_items(interaction, interaction.user.id, interaction.guild_id, sort.value if sort else "rarity")
+                sort_value = sort.value if sort else "rarity"
+                view = Items.ItemsView(self.bot, interaction.user, interaction.guild_id, sort_value)
+                await view.fetch_items()
+                view.sort_items()
+
+                await interaction.followup.send(
+                    embed=view.build_embed(),
+                    view=view
+                )
+                return
 
             elif action.value == "about":
                 if not query:
@@ -88,105 +259,7 @@ class Items(commands.Cog):
             await interaction.followup.send("❌ Something went wrong running this command.", ephemeral=True)
 
     # ============================================================
-    # PAGINATION VIEW
-    # ============================================================
-    class InventoryView(discord.ui.View):
-        def __init__(self, pages, user):
-            super().__init__(timeout=60)
-            self.pages = pages
-            self.index = 0
-            self.user = user
-
-        async def interaction_check(self, interaction: discord.Interaction):
-            if interaction.user.id != self.user.id:
-                log.warning(f"[PAGINATION] Unauthorized user {interaction.user.id} attempted to use buttons.")
-                return False
-            return True
-
-        @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-        async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
-            try:
-                self.index = (self.index - 1) % len(self.pages)
-                await interaction.response.edit_message(embed=self.pages[self.index], view=self)
-            except Exception as e:
-                log.error(f"[PAGINATION] Previous button failed: {e}")
-
-        @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
-        async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-            try:
-                self.index = (self.index + 1) % len(self.pages)
-                await interaction.response.edit_message(embed=self.pages[self.index], view=self)
-            except Exception as e:
-                log.error(f"[PAGINATION] Next button failed: {e}")
-
-    # ============================================================
-    # /items my — HYBRID LAYOUT (10 PER PAGE) + ACTIVE FILTER
-    # ============================================================
-    async def show_my_items(self, interaction, user_id, guild_id, sort):
-        try:
-            async with self.bot.db.acquire(timeout=2) as conn:
-                rows = await conn.fetch("""
-                    SELECT ui.item_id, ui.quantity, ci.*
-                    FROM user_items ui
-                    JOIN cd_items ci ON ci.item_id = ui.item_id
-                    WHERE ui.discord_id = $1
-                    AND ui.guild_id = $2
-                    AND ci.is_active = TRUE
-                """, user_id, guild_id)
-        except Exception as e:
-            log.error(f"[MY ITEMS] DB fetch failed for user {user_id}: {e}")
-            return await interaction.followup.send("❌ Failed to load your inventory.", ephemeral=True)
-
-        if not rows:
-            return await interaction.followup.send("📭 You don't own any active items.", ephemeral=True)
-
-        # Sorting
-        try:
-            if sort == "name":
-                rows = sorted(rows, key=lambda r: r["name"])
-            elif sort == "type":
-                rows = sorted(rows, key=lambda r: r["type"])
-            else:
-                rarity_order = {"Common": 1, "Uncommon": 2, "Rare": 3, "Epic": 4, "Legendary": 5}
-                rows = sorted(rows, key=lambda r: rarity_order.get(r["rarity"], 0), reverse=True)
-        except Exception as e:
-            log.error(f"[MY ITEMS] Sorting failed: {e}")
-
-        # Pagination (10 per page)
-        pages = []
-        chunk = 10
-
-        try:
-            for i in range(0, len(rows), chunk):
-                embed = discord.Embed(
-                    title="🎒 Your Active Items",
-                    description=f"Sorted by **{sort.capitalize()}**",
-                    color=discord.Color.blurple()
-                )
-
-                text = ""
-
-                for item in rows[i:i+chunk]:
-                    rarity_square = RARITY_COLORS.get(item["rarity"], "⬜")
-                    text += f"{rarity_square} **{item['name']} ×{item['quantity']}**\n"
-                    text += f"{item['description']}\n\n"
-
-                embed.description = text.strip()
-                pages.append(embed)
-
-        except Exception as e:
-            log.error(f"[MY ITEMS] Pagination embed creation failed: {e}")
-            return await interaction.followup.send("❌ Failed to build inventory pages.", ephemeral=True)
-
-        # Hide pagination if only 1 page
-        if len(pages) > 1:
-            view = self.InventoryView(pages, interaction.user)
-            await interaction.followup.send(embed=pages[0], view=view)
-        else:
-            await interaction.followup.send(embed=pages[0])
-
-    # ============================================================
-    # /items about
+    # /items about (UNCHANGED)
     # ============================================================
     async def show_item_about(self, interaction, query):
         try:
@@ -227,13 +300,12 @@ class Items(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     # ============================================================
-    # /items search — FIXED + PERK TYPE LOOKUP + ACTIVE FILTER
+    # /items search (UNCHANGED)
     # ============================================================
     async def search_item(self, interaction, query):
         try:
             async with self.bot.db.acquire(timeout=2) as conn:
 
-                # If autocomplete was used → query is an item_id
                 if query.isdigit():
                     row = await conn.fetchrow("""
                         SELECT *
@@ -252,7 +324,6 @@ class Items(commands.Cog):
                 if not row:
                     return await interaction.followup.send("❌ No active item found.", ephemeral=True)
 
-                # Fetch perk type
                 perk_type = None
                 if row["grants_perk_id"]:
                     perk_row = await conn.fetchrow("""

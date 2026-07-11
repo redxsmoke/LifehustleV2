@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import os
 import asyncio
 import logging
+from datetime import datetime
 
 from db.connection import init_db, get_pool
 from db.users import upsert_user
@@ -19,7 +20,7 @@ intents = discord.Intents.all()
 
 
 # =========================================================
-# LOTTERY PLACEHOLDER INITIALIZER
+# LOTTERY PLACEHOLDER INITIALIZER (using lottery_results_id only)
 # =========================================================
 async def ensure_lottery_placeholder(pool):
     async with pool.acquire() as conn:
@@ -27,7 +28,7 @@ async def ensure_lottery_placeholder(pool):
         # 1. Check for any open draw
         open_row = await conn.fetchrow(
             """
-            SELECT draw_id
+            SELECT lottery_results_id, draw_date, ran_status
             FROM lottery_results
             WHERE ran_status = 'not ran'
             LIMIT 1
@@ -37,27 +38,36 @@ async def ensure_lottery_placeholder(pool):
         # 2. Check if today's draw already exists
         today_row = await conn.fetchrow(
             """
-            SELECT draw_id
+            SELECT lottery_results_id, draw_date, ran_status
             FROM lottery_results
             WHERE draw_date = CURRENT_DATE
             LIMIT 1
             """
         )
 
-        # If either exists → do nothing
-        if open_row or today_row:
-            print("[LOTTERY] Placeholder draw already exists.")
+        # VALID CASES
+        if open_row:
+            print("[LOTTERY] Open 'not ran' draw already exists.")
             return
 
-        # 3. Insert a new placeholder safely
+        if today_row:
+            print("[LOTTERY] Today's draw already exists.")
+            return
+
+        # INSERT NEW PLACEHOLDER (PK lottery_results_id will be generated automatically)
+        print("[LOTTERY] No valid draw found. Creating new placeholder...")
+
         await conn.execute(
             """
-            INSERT INTO lottery_results (draw_date, ran_status)
+            INSERT INTO lottery_results (
+                draw_date,
+                ran_status
+            )
             VALUES (CURRENT_DATE, 'not ran')
             """
         )
 
-        print("[LOTTERY] Inserted initial 'not ran' draw placeholder.")
+        print("[LOTTERY] Inserted new placeholder draw.")
 
 
 class MyBot(commands.Bot):
@@ -66,20 +76,17 @@ class MyBot(commands.Bot):
         self.last_channel = None
 
     async def setup_hook(self):
-        # =========================
-        # DB INIT
-        # =========================
         await init_db()
         self.db = get_pool()
 
-        # =========================
-        # LOTTERY PLACEHOLDER
-        # =========================
+        # PLACEHOLDER FIRST
         await ensure_lottery_placeholder(self.db)
 
-        # =========================
-        # LOAD COGS
-        # =========================
+        # LOTTERY COGS
+        await self.load_extension("cogs.lottery.lottery_draw")
+        await self.load_extension("cogs.lottery.mylotterytickets")
+
+        # OTHER COGS
         await self.load_extension("cogs.general")
         await self.load_extension("cogs.economy")
         await self.load_extension("cogs.progression")
@@ -97,20 +104,13 @@ class MyBot(commands.Bot):
         await self.load_extension("cogs.deletemessages")
         await self.load_extension("users.views_civinfo")
         await self.load_extension("cogs.itemscommands.items_commands")
-        await self.load_extension("cogs.lottery.lottery_draw")
-        await bot.load_extension("cogs.lottery.mylotterytickets")
 
-
-        # POLICE SYSTEM
+        # POLICE
         await self.load_extension("police.daily_scheduler")
         await self.load_extension("police.commands_daily_report")
         await self.load_extension("police.clue_scheduler")
 
-        # =========================
-        # COMMAND SYNC
-        # =========================
         guild = discord.Object(id=GUILD_ID)
-
         self.tree.clear_commands(guild=guild)
         await self.tree.sync(guild=guild)
         await self.tree.sync()
@@ -119,11 +119,6 @@ class MyBot(commands.Bot):
         for cmd in self.tree.get_commands():
             print(f"- {cmd.name}")
 
-        pass
-
-    # =========================================================
-    # TRACK BOT MESSAGES FROM INTERACTIONS
-    # =========================================================
     async def on_interaction(self, interaction: discord.Interaction):
         async def track_response_send(*args, **kwargs):
             msg = await original_send(*args, **kwargs)
@@ -161,9 +156,6 @@ class MyBot(commands.Bot):
         interaction._user_created = created
         await self.process_application_commands(interaction)
 
-    # =========================================================
-    # TRACK BOT MESSAGES FROM channel.send()
-    # =========================================================
     async def on_message(self, message):
         if message.author.id == self.user.id:
             self.last_channel = message.channel

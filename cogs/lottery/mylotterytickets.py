@@ -37,7 +37,7 @@ class TicketRecord:
 
         if is_winning:
             self.winning_ticket_id = row["winning_ticket_id"]
-            self.draw_id = row["draw_id"]
+            self.lottery_results_id = row["lottery_results_id"]
             self.draw_date = row["draw_date"]
             self.discord_id = row["discord_id"]
             self.guild_id = row["guild_id"]
@@ -55,7 +55,7 @@ class TicketRecord:
             )
         else:
             self.lottery_ticket_id = row["lottery_ticket_id"]
-            self.draw_id = row["draw_id"]
+            self.lottery_results_id = row["lottery_results_id"]
             self.draw_date = row["draw_date"]
             self.discord_id = row["discord_id"]
             self.guild_id = row["guild_id"]
@@ -141,11 +141,13 @@ class TicketClaimSelect(discord.ui.Select):
     def __init__(self, tickets: List[TicketRecord]):
         options = []
         for t in tickets[:25]:
+            # ⭐ CHANGED: replaced draw_date with Draw ID
             label = (
-                f"{t.draw_date} - "
+                f"Draw ID: {t.lottery_results_id} - "
                 f"{fmt_number(t.num1)} {fmt_number(t.num2)} {fmt_number(t.num3)} "
                 f"{fmt_number(t.num4)} {fmt_number(t.num5)} PB {fmt_number(t.powerball)}"
             )
+
             options.append(
                 discord.SelectOption(
                     label=label,
@@ -159,6 +161,7 @@ class TicketClaimSelect(discord.ui.Select):
             max_values=1,
             options=options,
         )
+
 
     async def callback(self, interaction: discord.Interaction):
         try:
@@ -216,7 +219,7 @@ class TicketView(discord.ui.View):
                 if self.status == TicketStatus.ACTIVE:
                     rows = await conn.fetch(
                         """
-                        SELECT draw_id, lottery_ticket_id, discord_id, guild_id,
+                        SELECT lottery_results_id, lottery_ticket_id, discord_id, guild_id,
                                draw_date, num1, num2, num3, num4, num5, powerball,
                                ticket_status
                         FROM lottery
@@ -233,13 +236,13 @@ class TicketView(discord.ui.View):
                 elif self.status == TicketStatus.LOST:
                     rows = await conn.fetch(
                         """
-                        SELECT draw_id, lottery_ticket_id, discord_id, guild_id,
+                        SELECT lottery_results_id, lottery_ticket_id, discord_id, guild_id,
                                draw_date, num1, num2, num3, num4, num5, powerball,
                                ticket_status
                         FROM lottery
                         WHERE discord_id = $1
                           AND guild_id = $2
-                          AND ticket_status = 'lose'
+                          AND ticket_status = 'lost'
                         ORDER BY draw_date DESC, lottery_ticket_id DESC
                         """,
                         self.user.id,
@@ -250,7 +253,7 @@ class TicketView(discord.ui.View):
                 elif self.status == TicketStatus.WINNER:
                     rows = await conn.fetch(
                         """
-                        SELECT winning_ticket_id, draw_id, draw_date,
+                        SELECT winning_ticket_id, lottery_results_id, draw_date,
                                num1, num2, num3, num4, num5, powerball,
                                amount_won, discord_id, guild_id,
                                paid, paid_date, status
@@ -268,7 +271,7 @@ class TicketView(discord.ui.View):
                 elif self.status == TicketStatus.CLAIMED:
                     rows = await conn.fetch(
                         """
-                        SELECT winning_ticket_id, draw_id, draw_date,
+                        SELECT winning_ticket_id, lottery_results_id, draw_date,
                                num1, num2, num3, num4, num5, powerball,
                                amount_won, discord_id, guild_id,
                                paid, paid_date, status
@@ -333,6 +336,7 @@ class TicketView(discord.ui.View):
                 )
 
                 line = (
+                    f"**Draw ID:** {t.lottery_results_id}\n"
                     f"**Draw Date:** {t.draw_date}\n"
                     f"**Numbers:** {num_string} | PB {pb_string}\n"
                     f"**Status:** {status_label}\n"
@@ -340,7 +344,6 @@ class TicketView(discord.ui.View):
                 )
                 lines.append(line)
 
-            # SAFE FIELD INSERTION
             add_safe_field(embed, "Tickets", "\n".join(lines))
 
             return embed
@@ -352,9 +355,18 @@ class TicketView(discord.ui.View):
                 description="⚠️ Error building ticket view.",
                 color=discord.Color.red(),
             )
+
     async def refresh(self, interaction: discord.Interaction):
         try:
             await self.fetch_tickets()
+
+            # Remove old status selector
+            for item in list(self.children):
+                if isinstance(item, TicketStatusSelect):
+                    self.remove_item(item)
+
+            # Add fresh status selector
+            self.add_item(TicketStatusSelect(self.status))
 
             # Remove old claim selectors
             for item in list(self.children):
@@ -362,6 +374,8 @@ class TicketView(discord.ui.View):
                     self.remove_item(item)
 
             page_tickets = self.get_page_tickets()
+
+            # Add claim selector only for winners
             if self.status == TicketStatus.WINNER and page_tickets:
                 self.add_item(TicketClaimSelect(page_tickets))
 
@@ -369,6 +383,21 @@ class TicketView(discord.ui.View):
                 embed=self.build_embed(),
                 view=self
             )
+
+        except Exception as e:
+            log_error("TicketView.refresh", e)
+            try:
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="⚠️ Error",
+                        description="Error refreshing view.",
+                        color=discord.Color.red(),
+                    ),
+                    ephemeral=True,
+                )
+            except:
+                pass
+
         except Exception as e:
             log_error("TicketView.refresh", e)
             try:
@@ -450,7 +479,7 @@ class TicketView(discord.ui.View):
                     DELETE FROM lottery
                     WHERE discord_id = $1
                       AND guild_id = $2
-                      AND ticket_status = 'lose'
+                      AND ticket_status = 'lost'
                     """,
                     self.user.id,
                     self.guild.id,
@@ -486,7 +515,7 @@ class TicketView(discord.ui.View):
             async with pool.acquire() as conn:
                 ticket_row = await conn.fetchrow(
                     """
-                    SELECT winning_ticket_id, draw_id, draw_date,
+                    SELECT winning_ticket_id, lottery_results_id, draw_date,
                            num1, num2, num3, num4, num5, powerball,
                            amount_won, discord_id, guild_id,
                            paid, paid_date, status
@@ -711,7 +740,7 @@ class MyLotteryTickets(commands.Cog):
             await interaction.response.send_message(
                 embed=view.build_embed(),
                 view=view,
-                ephemeral=False
+                ephemeral=True
             )
 
         except Exception as e:

@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta
 import pytz
 import traceback
+from decimal import Decimal  # ✅ added
 
 WHITE = "⚪"
 RED = "🔴"
@@ -26,12 +27,15 @@ def log(msg):
 def fmt(n: int) -> str:
     return f"{n:02d}"
 
-def fmt_m_short(pennies: int) -> str:
-    dollars = pennies / 100
-    millions = dollars / 1_000_000
-    if millions.is_integer():
+def fmt_m_short(pennies) -> str:
+    pennies = Decimal(pennies)
+    dollars = pennies / Decimal(100)
+    millions = dollars / Decimal(1_000_000)
+
+    if millions % 1 == 0:
         return f"{int(millions)}m"
-    return f"{millions:.1f}m"
+
+    return f"{millions.quantize(Decimal('0.1'))}m"
 
 class LotteryDraw(commands.Cog):
     def __init__(self, bot):
@@ -60,7 +64,6 @@ class LotteryDraw(commands.Cog):
         try:
             now_est = datetime.now(EST).replace(tzinfo=None)
 
-            # Determine next draw date
             if TEST_MODE:
                 next_draw_date = now_est.date() + timedelta(days=1)
             else:
@@ -70,12 +73,10 @@ class LotteryDraw(commands.Cog):
 
             pool = get_pool()
 
-            # Skip draw unless correct time
             if not TEST_MODE:
                 if not (now_est.weekday() == 1 and now_est.hour == 20 and now_est.minute == 0):
                     return
 
-            # ⭐ RUN STORED PROCEDURE ⭐
             try:
                 async with pool.acquire() as conn:
                     await conn.execute("CALL run_lottery_draw();")
@@ -84,12 +85,11 @@ class LotteryDraw(commands.Cog):
                 traceback.print_exc()
                 return
 
-            # ⭐ FETCH CURRENT DRAW RESULTS ⭐
             try:
                 async with pool.acquire() as conn:
                     current_row = await conn.fetchrow(
                         """
-                        SELECT draw_id, draw_date,
+                        SELECT lottery_results_id, draw_date,
                                num1, num2, num3, num4, num5, powerball,
                                jackpot,
                                four_match_winners,
@@ -117,11 +117,9 @@ class LotteryDraw(commands.Cog):
                     powerball = current_row["powerball"]
 
                     jackpot_for_this_draw = current_row["jackpot"]
-
                     four_match_winners = current_row["four_match_winners"] or 0
                     five_match_winners = current_row["five_match_winners"] or 0
                     jackpot_winners = current_row["jackpot_winners"] or 0
-
                     next_jackpot = current_row["next_jackpot"]
 
             except Exception as e:
@@ -129,11 +127,8 @@ class LotteryDraw(commands.Cog):
                 traceback.print_exc()
                 return
 
-            # ⭐ PREPARE VALUES FOR EMBED ⭐
             winning_sorted = sorted(winning_nums)
-            revealed = winning_sorted
 
-            # ⭐ SEND INITIAL DRAW MESSAGE ⭐
             channel = getattr(self.bot, "last_channel", None)
             if channel is None:
                 log("ERROR: last_channel is None")
@@ -142,12 +137,12 @@ class LotteryDraw(commands.Cog):
             try:
                 embed = discord.Embed(
                     title=f"{MONEY} PowerBallz Weekly Draw {MONEY}",
-                    description="The numbers are being drawn...",
+                    description="Winning numbers are being revealed...",
                     color=discord.Color.gold()
                 )
 
-                embed.add_field(name="Drawn Numbers", value="`Drawing now...`", inline=False)
-                embed.add_field(name="Winning Numbers", value="`Waiting...`", inline=False)
+                embed.add_field(name="Winning Numbers", value="`Revealing...`", inline=False)
+
                 embed.add_field(
                     name="Jackpot (This Draw)",
                     value=f"**{fmt_m_short(jackpot_for_this_draw)}**",
@@ -161,23 +156,22 @@ class LotteryDraw(commands.Cog):
                 traceback.print_exc()
                 return
 
-            # ⭐ ANIMATE NUMBER REVEAL ⭐
             revealed = []
-            for num in winning_sorted:
+            for num in winning_nums:
                 try:
                     revealed.append(num)
 
                     embed = discord.Embed(
                         title=f"{MONEY} PowerBallz Weekly Draw {MONEY}",
-                        description="Numbers are being revealed...",
+                        description="Winning numbers are being revealed...",
                         color=discord.Color.gold()
                     )
 
-                    draw_display = "   ".join([f"{WHITE} `{fmt(n)}`" for n in revealed])
-                    draw_display += f"   {RED} `??`"
+                    reveal_display = " ".join([f"{WHITE} `{fmt(n)}`" for n in revealed])
+                    reveal_display += f"   {RED} `??`"
 
-                    embed.add_field(name="Drawn Numbers", value=draw_display, inline=False)
-                    embed.add_field(name="Winning Numbers", value="`Waiting...`", inline=False)
+                    embed.add_field(name="Winning Numbers", value=reveal_display, inline=False)
+
                     embed.add_field(
                         name="Jackpot (This Draw)",
                         value=f"**{fmt_m_short(jackpot_for_this_draw)}**",
@@ -200,19 +194,15 @@ class LotteryDraw(commands.Cog):
                     color=discord.Color.green()
                 )
 
-                # Drawn numbers (animated)
-                draw_display = " ".join([f"{WHITE} `{fmt(n)}`" for n in revealed])
-                draw_display += f" {RED} `{fmt(powerball)}`"
-
-                # Winning numbers (sorted)
-                winning_display = " ".join([f"{WHITE} `{fmt(n)}`" for n in winning_sorted])
-                winning_display += f" {RED} `{fmt(powerball)}`"
-
+                # ⭐ ADDED — Draw ID field (ONLY CHANGE)
                 embed.add_field(
-                    name="Drawn Numbers",
-                    value=draw_display,
+                    name="Draw ID",
+                    value=f"{current_row['lottery_results_id']}",
                     inline=False
                 )
+
+                winning_display = " ".join([f"{WHITE} `{fmt(n)}`" for n in winning_sorted])
+                winning_display += f" {RED} `{fmt(powerball)}`"
 
                 embed.add_field(
                     name="Winning Numbers",

@@ -14,26 +14,15 @@ def log_error(where, error):
     traceback.print_exc()
 
 
-async def create_test_draw(pool):
-    now_est = datetime.now(EST).replace(tzinfo=None)
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO lottery_results (draw_date, ran_status)
-            VALUES ($1, 'not ran')
-            RETURNING draw_id, draw_date, ran_status
-            """,
-            now_est
-        )
-        return row
-
+# ---------------------------------------------------------
+# get_next_draw_from_db — TEST_MODE draw creation removed
+# ---------------------------------------------------------
 
 async def get_next_draw_from_db(pool):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT draw_id, draw_date, ran_status
+            SELECT lottery_results_id, draw_date, ran_status
             FROM lottery_results
             WHERE ran_status = 'not ran'
             ORDER BY draw_date ASC
@@ -41,22 +30,63 @@ async def get_next_draw_from_db(pool):
             """
         )
 
-        now_est = datetime.now(EST).replace(tzinfo=None)
-
-        if TEST_MODE:
-            if row is None:
-                return await create_test_draw(pool)
-
-            draw_dt = datetime.combine(row["draw_date"], datetime.min.time())
-
-            if draw_dt > now_est + timedelta(minutes=5):
-                return await create_test_draw(pool)
-
+        # ⭐ No Python-created draws anymore
         return row
 
 
 def fmt(n):
     return f"{n:02d}"
+
+
+# ---------------------------------------------------------
+# QUANTITY SELECT — MUST BE ABOVE LottoView
+# ---------------------------------------------------------
+
+class QuantitySelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=str(x), value=str(x))
+            for x in [1, 5, 10, 20, 50, 100, 250]
+        ]
+
+        # ⭐ NEW OPTION — All Remaining
+        options.append(discord.SelectOption(
+            label="All Remaining",
+            value="ALL"
+        ))
+
+        super().__init__(
+            placeholder="Select ticket bundle",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction):
+        view: LottoView = self.view
+
+        if self.values[0] == "ALL":
+            view.quantity = "ALL"
+            self.placeholder = "All remaining tickets selected"
+
+            embed = discord.Embed(
+                title="🎟️ All Remaining Selected",
+                description="Click **Generate For Me** to purchase **all remaining tickets** allowed for this draw.",
+                color=discord.Color.blurple()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        view.quantity = int(self.values[0])
+        self.placeholder = f"{view.quantity} ticket bundle selected"
+
+        embed = discord.Embed(
+            title="🎟️ Ticket Bundle Selected",
+            description=f"Click **Generate For Me** to purchase **{view.quantity}** ticket(s).",
+            color=discord.Color.blurple()
+        )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------
@@ -233,42 +263,6 @@ class CancelButton(discord.ui.Button):
         await interaction.message.delete()
 
 
-# ---------------------------------------------------------
-# QUANTITY SELECT
-# ---------------------------------------------------------
-
-class QuantitySelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=str(x), value=str(x))
-            for x in [1, 5, 10, 20, 50, 100, 250]
-        ]
-
-        super().__init__(
-            placeholder="Select ticket bundle",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-    async def callback(self, interaction):
-        view: LottoView = self.view
-        view.quantity = int(self.values[0])
-        self.placeholder = f"{view.quantity} ticket bundle selected"
-
-        embed = discord.Embed(
-            title="🎟️ Ticket Bundle Selected",
-            description=f"You will purchase **{view.quantity}** ticket(s).",
-            color=discord.Color.blurple()
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# ---------------------------------------------------------
-# LOTTO VIEW (MAIN)
-# ---------------------------------------------------------
-
 class LottoView(discord.ui.View):
     def __init__(self, user_id, guild_id, pool):
         super().__init__(timeout=120)
@@ -278,7 +272,7 @@ class LottoView(discord.ui.View):
         self.quantity = 1
 
         self.next_draw_row = None
-        self.draw_id = None
+        self.draw_pk = None
         self.draw_date = None
         self.next_draw = None
         self.cutoff = None
@@ -292,7 +286,7 @@ class LottoView(discord.ui.View):
             raise RuntimeError("No upcoming draw found.")
 
         self.next_draw_row = row
-        self.draw_id = row["draw_id"]
+        self.draw_pk = row["lottery_results_id"]
         self.draw_date = row["draw_date"]
 
         if row["ran_status"] != "not ran":
@@ -333,32 +327,65 @@ class LottoView(discord.ui.View):
 
             purchase_ts = now_est
             draw_dt = self.draw_date
-            draw_id = self.draw_id
-            total_cost = LOTTO_COST * self.quantity
+            draw_pk = self.draw_pk
 
             async with self.pool.acquire() as conn:
+
                 existing_count = await conn.fetchval(
                     """
                     SELECT COUNT(*)
                     FROM lottery
-                    WHERE discord_id = $1 AND guild_id = $2 AND draw_id = $3
+                    WHERE discord_id = $1 AND guild_id = $2 AND lottery_results_id = $3
                     """,
-                    self.user_id, self.guild_id, draw_id
+                    self.user_id, self.guild_id, draw_pk
                 )
 
-                # UPDATED LIMIT ERROR MESSAGE
-                if existing_count + self.quantity > 250:
+                # ⭐ HARD LIMIT: cannot exceed 250 total tickets
+                if existing_count >= 250:
                     return await interaction.response.send_message(
                         embed=discord.Embed(
-                            title="❌ Limit Reached",
+                            title="❌ Purchase Failed",
                             description=(
-                                f"Cannot buy more than **250** tickets for this draw.\n"
-                                f"You've already purchased **{existing_count}**."
+                                f"You already purchased **{existing_count}** tickets for this draw.\n"
+                                f"The maximum allowed is **250**."
                             ),
                             color=discord.Color.red()
                         ),
                         ephemeral=True
                     )
+
+                # ⭐ ALL remaining logic stays the same
+                if self.quantity == "ALL":
+                    remaining_allowed = max(0, 250 - existing_count)
+
+                    if remaining_allowed <= 0:
+                        return await interaction.response.send_message(
+                            embed=discord.Embed(
+                                title="❌ Limit Reached",
+                                description="You cannot buy any more tickets for this draw.",
+                                color=discord.Color.red()
+                            ),
+                            ephemeral=True
+                        )
+
+                    self.quantity = remaining_allowed
+
+                # ⭐ NEW GUARD: prevent existing_count + quantity > 250
+                if existing_count + (self.quantity if isinstance(self.quantity, int) else 0) > 250:
+                    allowed = max(0, 250 - existing_count)
+                    return await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="❌ Purchase Failed",
+                            description=(
+                                f"This purchase would exceed the **250 ticket** limit for this draw.\n"
+                                f"You may only buy **{allowed}** more ticket(s)."
+                            ),
+                            color=discord.Color.red()
+                        ),
+                        ephemeral=True
+                    )
+
+                total_cost = LOTTO_COST * self.quantity
 
                 user = await conn.fetchrow(
                     """
@@ -413,7 +440,7 @@ class LottoView(discord.ui.View):
                     await conn.execute(
                         """
                         INSERT INTO lottery (
-                            draw_id,
+                            lottery_results_id,
                             discord_id, guild_id,
                             draw_date, purchase_date,
                             num1, num2, num3, num4, num5,
@@ -428,7 +455,7 @@ class LottoView(discord.ui.View):
                             'active'
                         )
                         """,
-                        draw_id, self.user_id, self.guild_id,
+                        draw_pk, self.user_id, self.guild_id,
                         draw_dt, purchase_ts,
                         ticket_nums[0], ticket_nums[1], ticket_nums[2],
                         ticket_nums[3], ticket_nums[4],

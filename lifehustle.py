@@ -19,57 +19,6 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 intents = discord.Intents.all()
 
 
-# =========================================================
-# LOTTERY PLACEHOLDER INITIALIZER (using lottery_results_id only)
-# =========================================================
-async def ensure_lottery_placeholder(pool):
-    async with pool.acquire() as conn:
-
-        # 1. Check for any open draw
-        open_row = await conn.fetchrow(
-            """
-            SELECT lottery_results_id, draw_date, ran_status
-            FROM lottery_results
-            WHERE ran_status = 'not ran'
-            LIMIT 1
-            """
-        )
-
-        # 2. Check if today's draw already exists
-        today_row = await conn.fetchrow(
-            """
-            SELECT lottery_results_id, draw_date, ran_status
-            FROM lottery_results
-            WHERE draw_date = CURRENT_DATE
-            LIMIT 1
-            """
-        )
-
-        # VALID CASES
-        if open_row:
-            print("[LOTTERY] Open 'not ran' draw already exists.")
-            return
-
-        if today_row:
-            print("[LOTTERY] Today's draw already exists.")
-            return
-
-        # INSERT NEW PLACEHOLDER (PK lottery_results_id will be generated automatically)
-        print("[LOTTERY] No valid draw found. Creating new placeholder...")
-
-        await conn.execute(
-            """
-            INSERT INTO lottery_results (
-                draw_date,
-                ran_status
-            )
-            VALUES (CURRENT_DATE, 'not ran')
-            """
-        )
-
-        print("[LOTTERY] Inserted new placeholder draw.")
-
-
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
@@ -79,8 +28,8 @@ class MyBot(commands.Bot):
         await init_db()
         self.db = get_pool()
 
-        # PLACEHOLDER FIRST
-        await ensure_lottery_placeholder(self.db)
+        # ❌ REMOVED: ensure_lottery_placeholder(self.db)
+        # The stored procedure now handles draw creation entirely.
 
         # LOTTERY COGS
         await self.load_extension("cogs.lottery.lottery_draw")

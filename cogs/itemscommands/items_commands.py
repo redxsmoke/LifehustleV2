@@ -47,7 +47,7 @@ class Items(commands.Cog):
         ]
 
     # ============================================================
-    # NEW UI SELECT — ITEM TYPE FILTER
+    # ITEM TYPE FILTER
     # ============================================================
     class ItemTypeSelect(discord.ui.Select):
         def __init__(self, current_filter: str):
@@ -58,33 +58,26 @@ class Items(commands.Cog):
                 discord.SelectOption(label="Tool", value="tool"),
                 discord.SelectOption(label="Badge", value="badge"),
             ]
-
             super().__init__(
                 placeholder="Filter items by type",
                 min_values=1,
                 max_values=1,
                 options=options,
             )
-
             for opt in self.options:
                 if opt.value == current_filter:
                     opt.default = True
 
         async def callback(self, interaction: discord.Interaction):
-            view: "ItemsView" = self.view  # type: ignore
-
+            view: "Items.ItemsView" = self.view  # type: ignore
             if interaction.user.id != view.user.id:
-                return await interaction.response.send_message(
-                    "⛔ This menu is not for you.",
-                    ephemeral=True
-                )
-
+                return await interaction.response.send_message("⛔ This menu is not for you.", ephemeral=True)
             view.type_filter = self.values[0]
             view.page = 0
             await view.refresh(interaction)
 
     # ============================================================
-    # NEW UI VIEW — LOTTERY STYLE
+    # INVENTORY VIEW — DANK MEMER STYLE (ONE EMBED, EMOJIS)
     # ============================================================
     class ItemsView(discord.ui.View):
         def __init__(self, bot, user, guild_id, sort):
@@ -97,30 +90,26 @@ class Items(commands.Cog):
             self.page = 0
             self.per_page = 10
             self.rows = []
-
-            # Dropdown ABOVE pagination (Option 1)
             self.add_item(Items.ItemTypeSelect(self.type_filter))
 
         async def fetch_items(self):
             try:
                 async with self.bot.db.acquire(timeout=2) as conn:
                     base_sql = """
-                        SELECT ui.item_id, ui.quantity, ci.*
+                        SELECT ui.item_id, ui.quantity, ci.name, ci.type, ci.rarity,
+                               ci.description, ci.emoji_name, ci.emoji_id
                         FROM user_items ui
                         JOIN cd_items ci ON ci.item_id = ui.item_id
                         WHERE ui.discord_id = $1
                         AND ui.guild_id = $2
                         AND ci.is_active = TRUE
                     """
-
                     params = [self.user.id, self.guild_id]
-
                     if self.type_filter != "all":
                         base_sql += " AND LOWER(ci.type) = LOWER($3)"
                         params.append(self.type_filter)
 
-                    rows = await conn.fetch(base_sql, *params)
-                    self.rows = rows
+                    self.rows = await conn.fetch(base_sql, *params)
 
             except Exception as e:
                 log.error(f"[ItemsView.fetch_items] {e}")
@@ -143,47 +132,51 @@ class Items(commands.Cog):
             end = start + self.per_page
             return self.rows[start:end]
 
-        def build_embed(self):
+        # ============================================================
+        # ONE EMBED, MULTIPLE EMOJI ICONS
+        # ============================================================
+        async def build_embeds(self):
+            page_items = self.get_page_items()
+
             embed = discord.Embed(
-                title="🎒 Your Active Items",
-                description=f"Sorted by **{self.sort.capitalize()}** | Filter: **{self.type_filter.capitalize()}**",
+                title=f"{self.user.display_name}'s Inventory",
                 color=discord.Color.blurple()
             )
 
-            page_items = self.get_page_items()
-
             if not page_items:
                 embed.description = "📭 You have no items in this category."
-                return embed
+                return [embed]
 
-            text = ""
+            lines = []
 
             for item in page_items:
-                icon = item["icon_path"]
-                if is_valid_url(icon):
-                    icon_prefix = f"[⠀]({icon})"
-                else:
-                    icon_prefix = RARITY_COLORS.get(item["rarity"], "⬜")
+                emoji = (
+                    f"<:{item['emoji_name']}:{item['emoji_id']}>"
+                    if item["emoji_id"] else "⬜"
+                )
 
-                text += f"{icon_prefix} **{item['name']} ×{item['quantity']}**\n"
-                text += f"{item['description']}\n\n"
+                lines.append(
+                    f"{emoji} **{item['name']} ─ {item['quantity']}**\n"
+                    f"{item['type']}"
+                )
 
-            embed.description = text.strip()
-            return embed
+            embed.description = "\n\n".join(lines)
+            return [embed]
 
         async def refresh(self, interaction: discord.Interaction):
             await self.fetch_items()
             self.sort_items()
 
-            # Remove old dropdown and re-add fresh one
-            for item in list(self.children):
-                if isinstance(item, Items.ItemTypeSelect):
-                    self.remove_item(item)
+            for child in list(self.children):
+                if isinstance(child, Items.ItemTypeSelect):
+                    self.remove_item(child)
 
             self.add_item(Items.ItemTypeSelect(self.type_filter))
 
+            embeds = await self.build_embeds()
+
             await interaction.response.edit_message(
-                embed=self.build_embed(),
+                embeds=embeds,
                 view=self
             )
 
@@ -191,21 +184,17 @@ class Items(commands.Cog):
         async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
             if interaction.user.id != self.user.id:
                 return await interaction.response.send_message("⛔ Not allowed.", ephemeral=True)
-
             if self.page > 0:
                 self.page -= 1
-
             await self.refresh(interaction)
 
         @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
         async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
             if interaction.user.id != self.user.id:
                 return await interaction.response.send_message("⛔ Not allowed.", ephemeral=True)
-
             max_page = max(0, (len(self.rows) - 1) // self.per_page)
             if self.page < max_page:
                 self.page += 1
-
             await self.refresh(interaction)
 
     # ============================================================
@@ -230,18 +219,14 @@ class Items(commands.Cog):
     @app_commands.autocomplete(query=item_autocomplete)
     async def items(self, interaction: discord.Interaction, action: app_commands.Choice[str], query: str = None, sort: app_commands.Choice[str] = None):
         await interaction.response.defer()
-
         try:
             if action.value == "my":
                 sort_value = sort.value if sort else "rarity"
                 view = Items.ItemsView(self.bot, interaction.user, interaction.guild_id, sort_value)
                 await view.fetch_items()
                 view.sort_items()
-
-                await interaction.followup.send(
-                    embed=view.build_embed(),
-                    view=view
-                )
+                embeds = await view.build_embeds()
+                await interaction.followup.send(embeds=embeds, view=view)
                 return
 
             elif action.value == "about":
@@ -259,7 +244,7 @@ class Items(commands.Cog):
             await interaction.followup.send("❌ Something went wrong running this command.", ephemeral=True)
 
     # ============================================================
-    # /items about (UNCHANGED)
+    # /items about (UPDATED)
     # ============================================================
     async def show_item_about(self, interaction, query):
         try:
@@ -277,30 +262,36 @@ class Items(commands.Cog):
         if not row:
             return await interaction.followup.send("❌ Item not found or inactive.", ephemeral=True)
 
-        color = discord.Color.green()
+        emoji = (
+            f"<:{row['emoji_name']}:{row['emoji_id']}>"
+            if row["emoji_id"] else "⬜"
+        )
 
-        try:
-            embed = discord.Embed(
-                title=f"📘 {row['name']}",
-                description=row["description"],
-                color=color
-            )
-            embed.add_field(name="💰 Cost", value=f"${row['price']:,}")
-            embed.add_field(name="🎚️ Rarity", value=row["rarity"])
-            embed.add_field(name="📦 Type", value=row["type"])
+        cost = (
+            "Not Purchasable"
+            if row["price"] == 0
+            else f"${row['price']:,}"
+        )
 
-            icon = row["icon_path"]
-            if is_valid_url(icon):
-                embed.set_thumbnail(url=icon)
+        embed = discord.Embed(
+            title=f"{emoji} {row['name']}",
+            color=discord.Color.green()
+        )
 
-        except Exception as e:
-            log.error(f"[ABOUT] Embed creation failed for '{query}': {e}")
-            return await interaction.followup.send("❌ Failed to build item info.", ephemeral=True)
+        embed.add_field(
+            name="📥 How Obtained",
+            value=row["description"],
+            inline=False
+        )
+
+        embed.add_field(name="💰 Cost", value=cost)
+        embed.add_field(name="🎚️ Rarity", value=row["rarity"])
+        embed.add_field(name="📦 Type", value=row["type"])
 
         await interaction.followup.send(embed=embed)
 
     # ============================================================
-    # /items search (UNCHANGED)
+    # /items search (UPDATED)
     # ============================================================
     async def search_item(self, interaction, query):
         try:
@@ -331,7 +322,6 @@ class Items(commands.Cog):
                         FROM cd_perks
                         WHERE perk_id = $1
                     """, row["grants_perk_id"])
-
                     if perk_row:
                         perk_type = perk_row["perk_type"]
 
@@ -339,36 +329,42 @@ class Items(commands.Cog):
             log.error(f"[SEARCH] DB error for '{query}': {e}")
             return await interaction.followup.send("❌ Search failed.", ephemeral=True)
 
-        color = discord.Color.gold()
+        emoji = (
+            f"<:{row['emoji_name']}:{row['emoji_id']}>"
+            if row["emoji_id"] else "⬜"
+        )
 
-        try:
-            embed = discord.Embed(
-                title=f"🔍 {row['name']}",
-                description=row["description"],
-                color=color
-            )
+        cost = (
+            "Not Purchasable"
+            if row["price"] == 0
+            else f"${row['price']:,}"
+        )
 
-            icon = row["icon_path"]
-            if is_valid_url(icon):
-                embed.set_thumbnail(url=icon)
+        purchase_limit = (
+            "N/A"
+            if not row["purchase_limit"] or row["purchase_limit"] == 0
+            else str(row["purchase_limit"])
+        )
 
-            embed.add_field(name="💰 Cost", value=f"${row['price']:,}")
-            embed.add_field(name="🎚️ Rarity", value=row["rarity"])
-            embed.add_field(name="📦 Type", value=row["type"])
-            embed.add_field(name="🔁 Tradable", value="Yes" if row["tradable"] else "No")
-            embed.add_field(name="🛒 Purchasable", value="Yes" if row["purchasable"] else "No")
+        embed = discord.Embed(
+            title=f"{emoji} {row['name']}",
+            color=discord.Color.gold()
+        )
 
-            if perk_type:
-                embed.add_field(name="🎁 Perk Granted", value=perk_type)
-            else:
-                embed.add_field(name="🎁 Perk Granted", value="None")
+        embed.add_field(
+            name="📥 How Obtained",
+            value=row["description"],
+            inline=False
+        )
 
-            embed.add_field(name="📉 Purchase Limit", value=str(row["purchase_limit"]))
-            embed.add_field(name="🆔 Item ID", value=str(row["item_id"]))
+        embed.add_field(name="💰 Cost", value=cost)
+        embed.add_field(name="🎚️ Rarity", value=row["rarity"])
+        embed.add_field(name="📦 Type", value=row["type"])
+        embed.add_field(name="🔁 Tradable", value="Yes" if row["tradable"] else "No")
+        embed.add_field(name="🛒 Purchasable", value="Yes" if row["purchasable"] else "No")
+        embed.add_field(name="🎁 Perk Granted", value=perk_type or "None")
+        embed.add_field(name="💸 Purchase Limit", value=purchase_limit)
 
-        except Exception as e:
-            log.error(f"[SEARCH] Embed creation failed for '{query}': {e}")
-            return await interaction.followup.send("❌ Failed to build item profile.", ephemeral=True)
 
         await interaction.followup.send(embed=embed)
 

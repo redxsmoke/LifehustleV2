@@ -4,13 +4,14 @@ async def start_vault_game(interaction: discord.Interaction, bot):
     """
     Starts the BreakJob vault minigame.
 
-    FIXED VERSION:
-    - Lazy‑imports VaultGameView to avoid circular import
-    - Sends a NEW message directly to the channel
-    - Prevents webhook expiration crashes
+    IMPORTANT:
+    - This function is called using a DummyInteraction inside handle_rob_job.
+    - DummyInteraction CANNOT use interaction.response.defer() or followup.
+    - Therefore: we ONLY send messages directly to the channel here.
+    - The REAL interaction must be deferred inside handle_rob_job.
     """
 
-    # ⭐ FIX: Import INSIDE the function to avoid circular import
+    # Lazy import to avoid circular dependency
     from .views_main import VaultGameView
 
     # Build the view
@@ -31,5 +32,7 @@ async def start_vault_game(interaction: discord.Interaction, bot):
         color=0x2ECC71
     )
 
-    # Send a NEW message directly to the channel
+    # IMPORTANT:
+    # DummyInteraction cannot use interaction.response or followup.
+    # So we send directly to the channel.
     await interaction.channel.send(embed=embed, view=view)

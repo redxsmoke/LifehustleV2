@@ -48,7 +48,14 @@ class CrimeCommands(commands.Cog):
         guild_id = interaction.guild.id
         user_id = interaction.user.id
 
-        # 🔥 FIX: Import here to avoid circular import
+        # ⭐ FIX: Respond IMMEDIATELY to the real interaction
+        # This prevents "This interaction failed" from appearing under Witness Decision.
+        try:
+            await interaction.response.defer()
+        except discord.errors.InteractionResponded:
+            pass
+
+        # Lazy import to avoid circular import
         from cogs.minigames.breakjob.command import start_vault_game
 
         try:
@@ -75,10 +82,7 @@ class CrimeCommands(commands.Cog):
                     color=0xF04747
                 )
 
-                try:
-                    return await interaction.response.send_message(embed=embed, ephemeral=True)
-                except discord.errors.InteractionResponded:
-                    return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.followup.send(embed=embed, ephemeral=True)
 
             # Set new cooldown
             rob_cooldowns[guild_id][user_id] = now + COOLDOWN_DURATION
@@ -102,13 +106,10 @@ class CrimeCommands(commands.Cog):
                     description="You can't rob a workplace safe if you don't even work there.",
                     color=0xFF0000
                 )
-                try:
-                    return await interaction.response.send_message(embed=embed, ephemeral=True)
-                except discord.errors.InteractionResponded:
-                    return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.followup.send(embed=embed, ephemeral=True)
 
             # ============================
-            # DUMMY INTERACTION FIX
+            # DUMMY INTERACTION SETUP
             # ============================
 
             class DummyResponse:
@@ -120,7 +121,6 @@ class CrimeCommands(commands.Cog):
                     return True
 
                 async def send_message(self, content=None, **kwargs):
-                    rob_logger.error("start_vault_game attempted DummyResponse.send_message; redirecting to channel.")
                     await self.channel.send(content=content, **kwargs)
 
             class DummyFollowup:

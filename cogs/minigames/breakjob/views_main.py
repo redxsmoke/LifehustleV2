@@ -90,8 +90,8 @@ class VaultGuessModal(discord.ui.Modal):
                 if police_view.selected_option == "chance":
                     await self.view.channel.send(
                         embed=discord.Embed(
-                            title="🚨 The police arrived at the scene of the crime!",
-                            description="They rush in with sirens blaring!",
+                            title="🚨 The police grab their donuts and head to their patrol cars!",
+                            description="They stop for coffee on the way!",
                             color=0xE74C3C
                         )
                     )
@@ -245,18 +245,36 @@ class SnitchDecisionView(discord.ui.View):
         self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Crook cannot interact
-        return interaction.user.id != self.parent_view.user_id
+        # ⭐ FIX: Allow crook to click (prevents "interaction failed")
+        return True
 
     @discord.ui.button(label="😎 I Ain't No Snitch", style=discord.ButtonStyle.secondary)
     async def no_snitch(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             user_id = interaction.user.id
 
+            # ⭐ CROOK LOGIC — crook gets EMBED insult + cannot vote
+            if user_id == self.parent_view.user_id:
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="🚫 Nice Try",
+                        description="Do you need a reminder not to snitch on yourself? A Real Einstein you are.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+
+            # ⭐ Witness logic
+            await interaction.response.defer()
+
             # User already chose
             if user_id in self.parent_view.no_snitchers or user_id in self.parent_view.snitchers:
-                return await interaction.response.send_message(
-                    "You've already made your choice.",
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="⚠️ Already Voted",
+                        description="You've already made your choice.",
+                        color=discord.Color.orange()
+                    ),
                     ephemeral=True
                 )
 
@@ -272,7 +290,7 @@ class SnitchDecisionView(discord.ui.View):
                                   last_updated = NOW();
                 """, user_id, interaction.guild.id)
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=discord.Embed(
                     title="😎 You Stayed Quiet",
                     description="You kept your mouth shut. **+10 street cred.**",
@@ -293,10 +311,28 @@ class SnitchDecisionView(discord.ui.View):
         try:
             user_id = interaction.user.id
 
+            # ⭐ CROOK LOGIC — crook gets EMBED insult + cannot snitch
+            if user_id == self.parent_view.user_id:
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="🚫 Absolutely Not",
+                        description="Are you the dumbest criminal alive?",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+
+            # ⭐ Witness logic
+            await interaction.response.defer()
+
             # User already chose
             if user_id in self.parent_view.no_snitchers or user_id in self.parent_view.snitchers:
-                return await interaction.response.send_message(
-                    "You've already made your choice.",
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="⚠️ Already Voted",
+                        description="You've already made your choice.",
+                        color=discord.Color.orange()
+                    ),
                     ephemeral=True
                 )
 
@@ -366,3 +402,6 @@ class SnitchDecisionView(discord.ui.View):
                 await self.message.edit(view=self)
         except Exception:
             logger.exception("SnitchDecisionView timeout crashed")
+
+
+

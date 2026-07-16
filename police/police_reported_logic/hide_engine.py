@@ -20,7 +20,6 @@ class HideButton(discord.ui.Button):
         self.controller.hide_spot_chosen = True
         self.controller.chosen_spot = self.spot
 
-        # ⭐ UPDATED: Embedded hide message
         await interaction.response.send_message(
             embed=discord.Embed(
                 title=f"🫣 You hid {self.spot}",
@@ -30,7 +29,6 @@ class HideButton(discord.ui.Button):
             ephemeral=True
         )
 
-        # ⭐ FIX: Disable hide buttons immediately so user cannot click twice
         try:
             await interaction.message.edit(view=None)
         except Exception:
@@ -51,6 +49,11 @@ class HideOnlyView(discord.ui.View):
 
 
 async def start_hide_sequence(controller, interaction):
+    # ⭐ FIX: Prevent hide sequence from running twice
+    if getattr(controller, "hide_sequence_started", False):
+        return
+    controller.hide_sequence_started = True
+
     controller.hide_spot_chosen = False
     controller.chosen_spot = None
 
@@ -63,9 +66,7 @@ async def start_hide_sequence(controller, interaction):
         view=HideOnlyView(controller)
     )
 
-    asyncio.create_task(hide_timeout(controller, hide_message))
-
-
+    # ⭐ FIX: ONLY ONE TIMEOUT TASK
     asyncio.create_task(hide_timeout(controller, hide_message))
 
 

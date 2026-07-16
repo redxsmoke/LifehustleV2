@@ -12,7 +12,8 @@ WHITE = "⚪"
 RED = "🔴"
 MONEY = "💸"
 
-TEST_MODE = True
+# TEST_MODE = True   # ← commented out but preserved
+TEST_MODE = False    # ← production mode
 
 BASE_JACKPOT = 100_000_000 * 100
 LOTTO_COST = 25000 * 100
@@ -37,46 +38,56 @@ def fmt_m_short(pennies) -> str:
 
     return f"{millions.quantize(Decimal('0.1'))}m"
 
+
 class LotteryDraw(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.bot.last_draw_minute = None  # prevents double-run
 
         try:
-            if TEST_MODE:
-                self.test_draw.change_interval(minutes=3)
-            else:
-                self.test_draw.change_interval(minutes=10)
-
-            self.test_draw.start()
+            self.lottery_scheduler.start()
         except Exception as e:
-            log(f"Failed to start loop: {e}")
+            log(f"Failed to start scheduler: {e}")
             traceback.print_exc()
 
-    @tasks.loop(minutes=10)
-    async def test_draw(self):
+    # ⭐ CLEAN SCHEDULER — ticks every minute, runs ONLY Tuesday 8 PM EST
+    @tasks.loop(minutes=1)
+    async def lottery_scheduler(self):
+        now_est = datetime.now(EST)
+
+        # Tuesday = 1 (Mon=0, Tue=1, ...)
+        is_tuesday = now_est.weekday() == 1
+        is_8pm = now_est.hour == 20 and now_est.minute == 0
+
+        if TEST_MODE:
+            # TEST MODE: run every minute
+            asyncio.create_task(self.run_lottery_draw())
+            return
+
+        # Production mode: only run Tuesday at 8:00 PM EST
+        if not (is_tuesday and is_8pm):
+            return
+
+        # Prevent double-run
+        current_minute = now_est.strftime("%Y-%m-%d %H:%M")
+        if self.bot.last_draw_minute == current_minute:
+            return
+
+        self.bot.last_draw_minute = current_minute
+
         asyncio.create_task(self.run_lottery_draw())
 
-    @test_draw.before_loop
-    async def before_test_draw(self):
+    @lottery_scheduler.before_loop
+    async def before_scheduler(self):
         await self.bot.wait_until_ready()
 
     async def run_lottery_draw(self):
         try:
             now_est = datetime.now(EST).replace(tzinfo=None)
 
-            if TEST_MODE:
-                next_draw_date = now_est.date() + timedelta(days=1)
-            else:
-                weekday = now_est.weekday()
-                days_until_tuesday = (1 - weekday) % 7
-                next_draw_date = (now_est + timedelta(days=days_until_tuesday)).date()
-
             pool = get_pool()
 
-            if not TEST_MODE:
-                if not (now_est.weekday() == 1 and now_est.hour == 20 and now_est.minute == 0):
-                    return
-
+            # ⭐ RUN STORED PROCEDURE
             try:
                 async with pool.acquire() as conn:
                     await conn.execute("CALL run_lottery_draw();")
@@ -85,6 +96,7 @@ class LotteryDraw(commands.Cog):
                 traceback.print_exc()
                 return
 
+            # ⭐ FETCH RESULTS
             try:
                 async with pool.acquire() as conn:
                     current_row = await conn.fetchrow(
@@ -134,6 +146,7 @@ class LotteryDraw(commands.Cog):
                 log("ERROR: last_channel is None")
                 return
 
+            # ⭐ INITIAL EMBED
             try:
                 embed = discord.Embed(
                     title=f"{MONEY} PowerBallz Weekly Draw {MONEY}",
@@ -156,6 +169,7 @@ class LotteryDraw(commands.Cog):
                 traceback.print_exc()
                 return
 
+            # ⭐ REVEAL NUMBERS ONE BY ONE
             revealed = []
             for num in winning_nums:
                 try:
@@ -186,7 +200,7 @@ class LotteryDraw(commands.Cog):
 
                 await asyncio.sleep(3)
 
-            # ⭐ FINAL RESULTS EMBED ⭐
+            # ⭐ FINAL RESULTS EMBED
             try:
                 embed = discord.Embed(
                     title=f"{MONEY} PowerBallz Weekly Draw Results {MONEY}",
@@ -194,7 +208,6 @@ class LotteryDraw(commands.Cog):
                     color=discord.Color.green()
                 )
 
-                # ⭐ ADDED — Draw ID field (ONLY CHANGE)
                 embed.add_field(
                     name="Draw ID",
                     value=f"{current_row['lottery_results_id']}",
@@ -272,7 +285,7 @@ class LotteryDraw(commands.Cog):
                 traceback.print_exc()
 
     async def cog_unload(self):
-        self.test_draw.cancel()
+        self.lottery_scheduler.cancel()
 
 
 async def setup(bot):

@@ -10,7 +10,6 @@ class SnitchConfirmView(View):
         super().__init__(timeout=20)
         self.controller = controller
 
-        # Track snitch state
         if not hasattr(self.controller, "has_snitched"):
             self.controller.has_snitched = False
 
@@ -25,26 +24,23 @@ class ConfirmSnitchButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
 
-        # ⭐ Crook cannot snitch on themselves
-        if interaction.user.id == self.controller.user_id:
-            return await interaction.response.send_message(
-                "You can't snitch on yourself.",
-                ephemeral=True
-            )
+        # ⭐ ALWAYS DEFER FIRST (public)
+        await interaction.response.defer()
 
-        # ⭐ Prevent double snitching
+        # Crook cannot snitch on themselves
+        if interaction.user.id == self.controller.user_id:
+            return await interaction.followup.send("You can't snitch on yourself.")
+
+        # Prevent double snitching
         if self.controller.has_snitched:
-            return await interaction.response.send_message(
-                "Someone already snitched.",
-                ephemeral=True
-            )
+            return await interaction.followup.send("Someone already snitched.")
 
         # Mark snitch as used
         self.controller.has_snitched = True
 
-        # ⭐ Disable ONLY this button globally
+        # Disable this button globally
         self.disabled = True
-        await interaction.message.edit(view=self.view)
+        await interaction.followup.edit_message(view=self.view)
 
         # Continue with intimidation logic
         blocked = await process_snitch(self.controller, interaction, interaction.user.id)
@@ -55,8 +51,7 @@ class ConfirmSnitchButton(Button):
                     title="😨 Intimidated!",
                     description="You backed down. The criminal scared you off.",
                     color=0xF04747,
-                ),
-                ephemeral=True
+                )
             )
             return
 
@@ -66,8 +61,7 @@ class ConfirmSnitchButton(Button):
                 title="🚨 You alerted the police!",
                 description="You made the call. The cops are rolling in.",
                 color=0xF04747,
-            ),
-            ephemeral=True
+            )
         )
 
         await self.controller.channel.send(
@@ -92,4 +86,5 @@ class CancelSnitchButton(Button):
         super().__init__(label="❌ Cancel", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message("Snitching canceled.", ephemeral=True)
+        await interaction.response.defer()
+        await interaction.followup.send("Snitching canceled.")

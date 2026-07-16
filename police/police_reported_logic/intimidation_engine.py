@@ -34,7 +34,6 @@ async def process_snitch(controller, interaction: discord.Interaction, snitcher_
                 snitch_user = interaction.guild.get_member(snitcher_id)
                 snitch_name = snitch_user.mention if snitch_user else "Unknown"
 
-                # ⭐ FIX: Send PUBLIC message to the robbery channel
                 await controller.channel.send(
                     embed=discord.Embed(
                         title="👁️ Intimidation Activated!",
@@ -47,8 +46,6 @@ async def process_snitch(controller, interaction: discord.Interaction, snitcher_
                     )
                 )
 
-                # ⭐ IMPORTANT: DO NOT respond to the interaction here
-                # The main snitch flow will continue safely.
 
                 return True  # intimidation blocked the snitch
 

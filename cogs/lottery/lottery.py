@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 
+# TEST_MODE = True   # ❌ COMMENTED OUT
+TEST_MODE = False    # ✅ Updated to False
+
 LOTTO_COST = 25000 * 100
-TEST_MODE = True
 EST = pytz.timezone("America/New_York")
 
 
@@ -127,9 +129,16 @@ class NumberPadView(discord.ui.View):
             description=(
                 "Select **5 numbers (01–69)** and **1 BigBallz (01–26)**.\n"
                 "Numbers 1–9 must be entered as **01–09**.\n\n"
-                "Each number is **two digits**. After two presses, it auto‑moves to the next."
+                "Each number is **two digits**. As you press digits, they appear immediately."
             ),
             color=discord.Color.blurple()
+        )
+
+        # Show current typing state
+        embed.add_field(
+            name="Typing",
+            value=f"**{self.current_digits or '--'}**",
+            inline=False
         )
 
         for i in range(5):
@@ -158,6 +167,18 @@ class NumberPadView(discord.ui.View):
             if not (1 <= num <= 69):
                 return await self.send_invalid(interaction)
 
+            # Prevent duplicate main numbers
+            if fmt(num) in self.numbers:
+                self.current_digits = ""
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="❌ Duplicate Number",
+                        description="Unless you want to throw your money away, **duplicate numbers are not allowed**.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+
             for i in range(5):
                 if self.numbers[i] == "--":
                     self.numbers[i] = fmt(num)
@@ -167,6 +188,7 @@ class NumberPadView(discord.ui.View):
             if not (1 <= num <= 26):
                 return await self.send_invalid(interaction)
 
+            # Powerball CAN match main numbers
             self.bigballz = fmt(num)
 
         self.current_digits = ""
@@ -292,22 +314,13 @@ class LottoView(discord.ui.View):
         if row["ran_status"] != "not ran":
             raise RuntimeError("Next draw is already closed.")
 
-        if TEST_MODE:
-            now_est = datetime.now(EST).replace(tzinfo=None)
+        # ⭐ TEST MODE DISABLED — REAL DRAW LOGIC ONLY
+        self.next_draw = datetime.combine(
+            self.draw_date,
+            datetime.min.time()
+        ).replace(hour=20, minute=0)
 
-            minutes = (now_est.minute // 3) * 3
-            next_cycle = now_est.replace(minute=minutes, second=0, microsecond=0)
-            self.next_draw = next_cycle + timedelta(minutes=3)
-
-            self.cutoff = self.next_draw - timedelta(minutes=1)
-            self.draw_date = self.next_draw.date()
-
-        else:
-            self.next_draw = datetime.combine(
-                self.draw_date,
-                datetime.min.time()
-            ).replace(hour=20, minute=0)
-            self.cutoff = self.next_draw - timedelta(minutes=30)
+        self.cutoff = self.next_draw - timedelta(minutes=30)
 
     async def process_ticket(self, interaction, nums=None, pb=None):
         try:

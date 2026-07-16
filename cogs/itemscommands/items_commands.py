@@ -103,6 +103,7 @@ class Items(commands.Cog):
                         WHERE ui.discord_id = $1
                         AND ui.guild_id = $2
                         AND ci.is_active = TRUE
+                        AND ui.quantity >='1'
                     """
                     params = [self.user.id, self.guild_id]
                     if self.type_filter != "all":

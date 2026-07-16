@@ -18,14 +18,13 @@ class TravelMiniGameView(discord.ui.View):
         self.step = 0
         self.failed = False
         self.passed = False
-        self.result_message = ""
         self._message = None
         self._timeout_task = None
 
-        # economy effects
+        # economy effects (for summary)
         self.extra_reward_cents = 0
         self.extra_penalty_cents = 0
-        self.xp_reward = 0  # <-- XP reward stored here
+        self.xp_reward = 0
 
         # controls
         self.left_button = discord.ui.Button(label="⬅️ Left", style=discord.ButtonStyle.primary)
@@ -62,19 +61,12 @@ class TravelMiniGameView(discord.ui.View):
             log("All steps completed — marking as passed")
             self.passed = True
 
-            # Cash reward
+            # Rewards for summary
             self.extra_reward_cents = random.randint(50000, 150000)
-
-            # XP reward: 100 × random(1.33–5.44)
             xp_multiplier = random.uniform(1.33, 5.44)
             self.xp_reward = int(100 * xp_multiplier)
 
-            self.result_message = (
-                f"**Success!**\n"
-                f"Cash Reward: **${self.extra_reward_cents/100:,.2f}**\n"
-                f"XP Reward: **{self.xp_reward:,} XP**"
-            )
-
+            # Keep behavior: edit message, remove buttons, let summary handle outcome
             await self._message.edit(embed=self.get_embed(), view=None)
             self.stop()
             return
@@ -132,23 +124,21 @@ class TravelMiniGameView(discord.ui.View):
         else:
             log(f"CRASH at step {self.step}! Lane={self.current_lane}, obstacles={obstacles}")
             self.failed = True
+
+            # Penalty for summary
             self.extra_penalty_cents = random.randint(50000, 150000)
-            self.result_message = (
-                f"You hit an obstacle in lane(s) {', '.join(obstacles)}! 💥\n"
-                f"Penalty: -${self.extra_penalty_cents/100:,.2f}"
-            )
+
+            # Keep behavior: edit message, remove buttons, let summary handle outcome
             await self._message.edit(embed=self.get_embed(), view=None)
             self.stop()
 
     def get_embed(self):
-        if self.failed:
-            title = "❌ Crash!"
-            color = discord.Color.red()
-            desc = self.result_message
-        elif self.passed:
-            title = "✅ Success!"
-            color = discord.Color.green()
-            desc = self.result_message
+        # No explicit "Success" or "Crash" text; just scene or neutral state
+        if self.failed or self.passed:
+            # Neutral end-state; summary will describe outcome
+            title = "🕹️ Travel Outcome"
+            color = discord.Color.blurple()
+            desc = ""  # travel summary will fill in what happened
         else:
             title = "🕹️ Avoid the Obstacles"
             color = discord.Color.blurple()

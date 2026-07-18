@@ -3,96 +3,83 @@ import asyncio
 import random
 import logging
 
+from police.police_reported_logic.police_flow_controller import PoliceFlowController
+from police.police_reported_logic.universal_snitch_system import start_snitch_flow
+
 logger = logging.getLogger("crime.gta.smashwindow")
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.DEBUG)
 
 
 class SmashWindowView(discord.ui.View):
     def __init__(self, user_id: int, victim: discord.Member, stage2_callback):
-        super().__init__(timeout=20)
+        super().__init__(timeout=10)
         self.user_id = user_id
         self.victim = victim
         self.stage2_callback = stage2_callback
 
-        self.bar_length = 12
-        self.marker_pos = 0
-        self.direction = 1
-        self.speed = 2
-        self.tick_rate = 0.1
-
-        quiet_start = random.randint(1, 7)
-        quiet_end = quiet_start + random.randint(2, 4)
-        self.quiet_zone = range(quiet_start, min(quiet_end, self.bar_length - 1))
-
         self.message: discord.Message | None = None
-        self.smash_pressed = False
+        self.ready_to_smash = False
+        self.smashed = False
+
+        # ⭐ Prevent duplicate loud breaks
+        self.loud_break_triggered = False
 
         self.add_item(SmashButton(self))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
 
-    async def start_animation(self, message: discord.Message):
+    async def start_sequence(self, message: discord.Message):
         self.message = message
 
         try:
-            for _ in range(200):
-                if self.smash_pressed:
-                    return
-
-                self.marker_pos += self.direction * self.speed
-
-                if self.marker_pos >= self.bar_length - 1:
-                    self.marker_pos = self.bar_length - 1
-                    self.direction = -1
-                elif self.marker_pos <= 0:
-                    self.marker_pos = 0
-                    self.direction = 1
-
-                await self.update_embed()
-                await asyncio.sleep(self.tick_rate)
-
-        except Exception as e:
-            logger.exception("Error in smash window animation: %s", e)
-
-    async def update_embed(self):
-        try:
-            if not self.message:
-                return
-
-            bar_list = ["🟩" if i in self.quiet_zone else "░" for i in range(self.bar_length)]
-            bar_list[self.marker_pos] = "🔘"
-            bar = "".join(bar_list)
-
+            # Intro embed
             embed = discord.Embed(
-                title="💥 Smash Window Minigame",
+                title="💥 Window Breach Sequence",
                 description=(
-                    "Time your smash to avoid making noise!\n\n"
-                    "**You have 20 seconds to break the window.**\n\n"
-                    f"`{bar}`"
+                    "You're preparing to break the window without drawing attention.\n"
+                    "Stay focused.\n\n"
+                    "The perfect moment is approaching..."
                 ),
                 color=discord.Color.orange()
             )
+            await message.edit(embed=embed)
 
-            await self.message.edit(embed=embed)
+            # Suspense delay
+            await asyncio.sleep(random.uniform(1.5, 3.5))
 
-        except Exception as e:
-            logger.exception("SmashWindow.update_embed error: %s", e)
+            # Quiet smash window opens
+            self.ready_to_smash = True
 
-    async def on_timeout(self):
-        try:
-            if not self.smash_pressed:
+            embed = discord.Embed(
+                title="💥 Silent Opportunity",
+                description=(
+                    "**This is your moment.**\n"
+                    "Break the window *quietly*.\n\n"
+                    "Tap the button **immediately** to keep the noise down."
+                ),
+                color=discord.Color.green()
+            )
+            await message.edit(embed=embed, view=self)
+
+            # Reaction window
+            await asyncio.sleep(0.6)
+
+            # ⭐ Loud break only once
+            if not self.smashed and not self.loud_break_triggered:
+                self.loud_break_triggered = True
                 await self.handle_loud_break()
+
         except Exception as e:
-            logger.exception("SmashWindow.on_timeout error: %s", e)
+            logger.exception(f"[start_sequence] ERROR: {e}")
 
     async def handle_quiet_break(self):
         try:
             embed = discord.Embed(
-                title="🤫 Silent Break!",
+                title="🤫 Silent Break",
                 description=(
-                    "You smashed the window quietly.\n"
-                    "No one noticed.\n\n"
+                    "Perfect timing.\n"
+                    "No one heard a thing.\n\n"
                     "Proceeding to Stage 2..."
                 ),
                 color=discord.Color.green()
@@ -104,16 +91,16 @@ class SmashWindowView(discord.ui.View):
             await self.stage2_callback()
 
         except Exception as e:
-            logger.exception("Error in handle_quiet_break: %s", e)
+            logger.exception(f"[handle_quiet_break] ERROR: {e}")
 
     async def handle_loud_break(self):
         try:
             embed = discord.Embed(
-                title="🔊 Loud Break!",
+                title="🔊 Noise Detected",
                 description=(
-                    "You smashed the window loudly.\n"
-                    "The neighborhood heard it!\n\n"
-                    "Broadcasting alert..."
+                    "Your timing was off.\n"
+                    "The window shattered loudly — the neighborhood heard it.\n\n"
+                    "Alerting witnesses..."
                 ),
                 color=discord.Color.red()
             )
@@ -130,7 +117,16 @@ class SmashWindowView(discord.ui.View):
             await self.stage2_callback()
 
         except Exception as e:
-            logger.exception("Error in handle_loud_break: %s", e)
+            logger.exception(f"[handle_loud_break] ERROR: {e}")
+
+    async def on_timeout(self):
+        try:
+            # ⭐ Prevent timeout from triggering loud break twice
+            if not self.smashed and not self.loud_break_triggered:
+                self.loud_break_triggered = True
+                await self.handle_loud_break()
+        except Exception as e:
+            logger.exception(f"[on_timeout] ERROR: {e}")
 
 
 class SmashButton(discord.ui.Button):
@@ -145,20 +141,19 @@ class SmashButton(discord.ui.Button):
                     "This isn't your break‑in.", ephemeral=True
                 )
 
-            try:
-                await interaction.response.defer()
-            except Exception:
-                pass
+            await interaction.response.defer()
+            self.parent_view.smashed = True
 
-            self.parent_view.smash_pressed = True
-
-            if self.parent_view.marker_pos in self.parent_view.quiet_zone:
+            # Quiet or loud break — but loud break only once
+            if self.parent_view.ready_to_smash:
                 await self.parent_view.handle_quiet_break()
             else:
-                await self.parent_view.handle_loud_break()
+                if not self.parent_view.loud_break_triggered:
+                    self.parent_view.loud_break_triggered = True
+                    await self.parent_view.handle_loud_break()
 
         except Exception as e:
-            logger.exception(f"SmashButton.callback outer error: {e}")
+            logger.exception(f"[SmashButton.callback] ERROR: {e}")
             try:
                 await interaction.response.send_message("❌ Error smashing window.", ephemeral=True)
             except Exception:
@@ -171,22 +166,16 @@ async def trigger_noise_broadcast(
     criminal_id: int
 ):
     try:
-        embed = discord.Embed(
-            title="🚨 Vehicle Break-In Detected!",
-            description=(
-                f"Someone is trying to break into {victim.mention}'s vehicle!\n\n"
-                "You have **15 seconds** to report this crime.\n\n"
-                "🔴 Report to Police — lose street cred\n"
-                "🟢 I Ain't No Snitch — gain street cred"
-            ),
-            color=discord.Color.red()
+        controller = PoliceFlowController(
+            user_id=criminal_id,
+            guild_id=victim.guild.id,
+            channel=channel,
+            crime_type="grand_theft_auto",
+            stolen_amount=None,
+            company_name=None,
         )
 
-        from .stage1 import GTAReportView
-
-        view = GTAReportView(victim, criminal_id)
-        msg = await channel.send(embed=embed, view=view)
-        view.message = msg
+        await start_snitch_flow(controller, channel)
 
     except Exception as e:
-        logger.exception("Error sending noise broadcast: %s", e)
+        logger.exception(f"[trigger_noise_broadcast] ERROR: {e}")

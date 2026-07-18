@@ -14,14 +14,12 @@ class SmashWindowView(discord.ui.View):
         self.victim = victim
         self.stage2_callback = stage2_callback
 
-        # Optimized slider settings
         self.bar_length = 12
         self.marker_pos = 0
         self.direction = 1
         self.speed = 2
         self.tick_rate = 0.1
 
-        # Quiet zone (random)
         quiet_start = random.randint(1, 7)
         quiet_end = quiet_start + random.randint(2, 4)
         self.quiet_zone = range(quiet_start, min(quiet_end, self.bar_length - 1))
@@ -38,9 +36,8 @@ class SmashWindowView(discord.ui.View):
         self.message = message
 
         try:
-            for _ in range(200):  # 20 seconds at 0.1s
+            for _ in range(200):
                 if self.smash_pressed:
-                    logger.info("SmashWindow: smash_pressed detected, stopping animation.")
                     return
 
                 self.marker_pos += self.direction * self.speed
@@ -61,7 +58,6 @@ class SmashWindowView(discord.ui.View):
     async def update_embed(self):
         try:
             if not self.message:
-                logger.error("SmashWindow: update_embed called with no message reference.")
                 return
 
             bar_list = ["🟩" if i in self.quiet_zone else "░" for i in range(self.bar_length)]
@@ -85,7 +81,6 @@ class SmashWindowView(discord.ui.View):
 
     async def on_timeout(self):
         try:
-            logger.warning("SmashWindow: timeout reached, forcing loud break.")
             if not self.smash_pressed:
                 await self.handle_loud_break()
         except Exception as e:
@@ -96,7 +91,7 @@ class SmashWindowView(discord.ui.View):
             embed = discord.Embed(
                 title="🤫 Silent Break!",
                 description=(
-                    "You smashed the window **quietly**.\n"
+                    "You smashed the window quietly.\n"
                     "No one noticed.\n\n"
                     "Proceeding to Stage 2..."
                 ),
@@ -106,10 +101,7 @@ class SmashWindowView(discord.ui.View):
             if self.message:
                 await self.message.edit(embed=embed, view=None)
 
-            try:
-                await self.stage2_callback()
-            except Exception as e:
-                logger.exception("SmashWindow: stage2_callback error (quiet): %s", e)
+            await self.stage2_callback()
 
         except Exception as e:
             logger.exception("Error in handle_quiet_break: %s", e)
@@ -119,7 +111,7 @@ class SmashWindowView(discord.ui.View):
             embed = discord.Embed(
                 title="🔊 Loud Break!",
                 description=(
-                    "You smashed the window **loudly**.\n"
+                    "You smashed the window loudly.\n"
                     "The neighborhood heard it!\n\n"
                     "Broadcasting alert..."
                 ),
@@ -129,23 +121,18 @@ class SmashWindowView(discord.ui.View):
             if self.message:
                 await self.message.edit(embed=embed, view=None)
 
-            try:
-                # FIXED: pass criminal_id
-                await trigger_noise_broadcast(
-                    self.message.channel,
-                    self.victim,
-                    self.user_id
-                )
-            except Exception as e:
-                logger.exception("SmashWindow: broadcast error: %s", e)
+            await trigger_noise_broadcast(
+                self.message.channel,
+                self.victim,
+                self.user_id
+            )
 
-            try:
-                await self.stage2_callback()
-            except Exception as e:
-                logger.exception("SmashWindow: stage2_callback error (loud): %s", e)
+            await self.stage2_callback()
 
         except Exception as e:
             logger.exception("Error in handle_loud_break: %s", e)
+
+
 class SmashButton(discord.ui.Button):
     def __init__(self, parent_view: SmashWindowView):
         super().__init__(label="💥 Smash Window", style=discord.ButtonStyle.danger)
@@ -160,18 +147,15 @@ class SmashButton(discord.ui.Button):
 
             try:
                 await interaction.response.defer()
-            except Exception as e:
-                logger.warning(f"SmashWindow: interaction.defer failed: {e}")
+            except Exception:
+                pass
 
             self.parent_view.smash_pressed = True
 
-            try:
-                if self.parent_view.marker_pos in self.parent_view.quiet_zone:
-                    await self.parent_view.handle_quiet_break()
-                else:
-                    await self.parent_view.handle_loud_break()
-            except Exception as e:
-                logger.exception(f"SmashWindow: error in break handler: {e}")
+            if self.parent_view.marker_pos in self.parent_view.quiet_zone:
+                await self.parent_view.handle_quiet_break()
+            else:
+                await self.parent_view.handle_loud_break()
 
         except Exception as e:
             logger.exception(f"SmashButton.callback outer error: {e}")
@@ -200,7 +184,6 @@ async def trigger_noise_broadcast(
 
         from .stage1 import GTAReportView
 
-        # FIXED: pass criminal_id
         view = GTAReportView(victim, criminal_id)
         msg = await channel.send(embed=embed, view=view)
         view.message = msg

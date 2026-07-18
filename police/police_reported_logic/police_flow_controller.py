@@ -62,6 +62,8 @@ class PoliceFlowController:
         self.outcome = None
         self.robbery_complete = asyncio.Event()
 
+        self.police_finalized = False
+
     def get_config(self):
         return CRIME_CONFIG.get(self.crime_type, {})
 

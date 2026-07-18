@@ -8,17 +8,20 @@ logger = logging.getLogger("crime.gta.stage1")
 logger.setLevel(logging.ERROR)
 
 
-# ============================================================
-# STREET CRED
-# ============================================================
-
 class ReportToPoliceButton(discord.ui.Button):
-    def __init__(self, victim: discord.Member):
+    def __init__(self, victim: discord.Member, criminal_id: int):
         super().__init__(label="🚨 Report to Police", style=discord.ButtonStyle.danger)
         self.victim = victim
+        self.criminal_id = criminal_id
 
     async def callback(self, interaction: discord.Interaction):
         try:
+            # FIX: Defer immediately so the interaction doesn't expire
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except:
+                pass
+
             pool = get_pool()
             async with pool.acquire() as conn:
                 await conn.execute("""
@@ -27,21 +30,63 @@ class ReportToPoliceButton(discord.ui.Button):
                     WHERE discord_id = $1 AND guild_id = $2
                 """, interaction.user.id, interaction.guild.id)
 
-            embed = discord.Embed(
-                title="🚨 You Reported the Crime",
-                description="You snitched. **-10 street cred.**",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            from police.police_reported_logic.police_flow_controller import PoliceFlowController
+            from police.police_reported_logic.intimidation_engine import process_snitch as handle_universal_snitch
+            from police.police_reported_logic.police_items import PoliceItemView
 
-            logger.info(f"[GTA] {interaction.user.id} reported vehicle theft on {self.victim.id}")
+            controller = PoliceFlowController(
+                self.criminal_id,
+                interaction.guild.id,
+                interaction.channel,
+                "grand_theft_auto"
+            )
+
+            blocked = await handle_universal_snitch(controller, interaction, interaction.user.id)
+
+            if not blocked:
+                await interaction.channel.send(
+                    embed=discord.Embed(
+                        title="🚨 Crime Report Filed!",
+                        description="A witness reported the vehicle theft to the police!",
+                        color=0xE74C3C
+                    )
+                )
+
+                user_items = await controller.get_user_items()
+                police_view = PoliceItemView(controller, user_items)
+
+                msg = await interaction.channel.send(
+                    embed=discord.Embed(
+                        title="🚨 Someone alerted the police!",
+                        description="⚠️ Choose your move! You have 20 seconds before the police leave the station!",
+                        color=0xE74C3C
+                    ),
+                    view=police_view
+                )
+
+                await police_view.wait_for_choice()
+
+                if not controller.police_finalized:
+                    controller.police_finalized = True
+                    await police_view.finalize_choice(interaction)
+
+            # FIX: Must use followup.send after deferring
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="🚨 You Reported the Crime",
+                    description="You snitched. -10 street cred.",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
 
         except Exception as e:
             logger.exception("Error in ReportToPoliceButton: %s", e)
             try:
-                await interaction.response.send_message("❌ Error reporting to police.", ephemeral=True)
+                await interaction.followup.send("❌ Error reporting to police.", ephemeral=True)
             except Exception:
                 pass
+
 
 
 class NoSnitchButton(discord.ui.Button):
@@ -51,6 +96,12 @@ class NoSnitchButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         try:
+            # FIX: Defer immediately
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except:
+                pass
+
             pool = get_pool()
             async with pool.acquire() as conn:
                 await conn.execute("""
@@ -64,16 +115,17 @@ class NoSnitchButton(discord.ui.Button):
                 description="You kept your mouth shut. **+10 street cred.**",
                 color=discord.Color.green()
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
 
-            logger.info(f"[GTA] {interaction.user.id} ignored vehicle theft on {self.victim.id}")
+            # FIX: followup.send
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception as e:
             logger.exception("Error in NoSnitchButton: %s", e)
             try:
-                await interaction.response.send_message("❌ Error processing street cred.", ephemeral=True)
+                await interaction.followup.send("❌ Error processing street cred.", ephemeral=True)
             except Exception:
                 pass
+
 
 
 class GTAReportView(discord.ui.View):
@@ -83,17 +135,16 @@ class GTAReportView(discord.ui.View):
         self.criminal_id = criminal_id
         self.message: discord.Message | None = None
 
-        self.add_item(ReportToPoliceButton(victim))
+        self.add_item(ReportToPoliceButton(victim, criminal_id))
         self.add_item(NoSnitchButton(victim))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Criminal CANNOT interact with the report buttons
         if interaction.user.id == self.criminal_id:
-            await interaction.response.send_message(
+            # FIX: followup.send instead of response.send_message
+            await interaction.followup.send(
                 "You cannot report your own crime.", ephemeral=True
             )
             return False
-
         return True
 
     async def on_timeout(self):
@@ -106,19 +157,11 @@ class GTAReportView(discord.ui.View):
             logger.exception("Error updating GTAReportView on timeout: %s", e)
 
 
-
-
-# ============================================================
-# KEYPAD GAME
-# ============================================================
-
 class GTAKeypadGame:
     def __init__(self):
         self.code = [random.randint(0, 9) for _ in range(3)]
         self.attempts = 0
         self.noise = 0.0
-
-        logger.info(f"[Stage1] Keypad code generated: {self.code}")
 
     def check_guess(self, guess_str: str):
         if len(guess_str) != 3 or not guess_str.isdigit():
@@ -149,10 +192,6 @@ class GTAKeypadGame:
         return "clues", clues_str, noise_full
 
 
-# ============================================================
-# STAGE 1 ENTRY POINT
-# ============================================================
-
 async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discord.Member):
     try:
         view = GTAStage1View(interaction.user.id, bot, victim, interaction.channel)
@@ -178,9 +217,7 @@ async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discor
             await interaction.response.send_message("❌ Error starting GTA Stage 1.", ephemeral=True)
         except Exception:
             pass
-# ============================================================
-# STAGE 1 VIEW (CHOICE: CAR CODE OR SMASH WINDOW)
-# ============================================================
+
 
 class GTAStage1View(discord.ui.View):
     def __init__(self, user_id: int, bot, victim: discord.Member, channel: discord.TextChannel):
@@ -209,11 +246,9 @@ class EnterCarCodeButton(discord.ui.Button):
                 "This isn't your break‑in.", ephemeral=True
             )
 
-        # Disable both buttons
         for child in self.parent_view.children:
             child.disabled = True
 
-        # FIXED: ephemeral message must be edited via response.edit_message()
         try:
             await interaction.response.edit_message(view=self.parent_view)
         except Exception as e:
@@ -258,8 +293,290 @@ class EnterCarCodeButton(discord.ui.Button):
                 await interaction.followup.send("❌ Error initializing keypad.", ephemeral=True)
             except Exception:
                 pass
+import discord
+import asyncio
+import logging
+import random
+from db.connection import get_pool
+
+logger = logging.getLogger("crime.gta.stage1")
+logger.setLevel(logging.ERROR)
 
 
+class ReportToPoliceButton(discord.ui.Button):
+    def __init__(self, victim: discord.Member, criminal_id: int):
+        super().__init__(label="🚨 Report to Police", style=discord.ButtonStyle.danger)
+        self.victim = victim
+        self.criminal_id = criminal_id
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            # FIX: Defer immediately so the interaction doesn't expire
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except:
+                pass
+
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE user_stats
+                    SET street_cred = street_cred - 10
+                    WHERE discord_id = $1 AND guild_id = $2
+                """, interaction.user.id, interaction.guild.id)
+
+            from police.police_reported_logic.police_flow_controller import PoliceFlowController
+            from police.police_reported_logic.intimidation_engine import process_snitch as handle_universal_snitch
+            from police.police_reported_logic.police_items import PoliceItemView
+
+            controller = PoliceFlowController(
+                self.criminal_id,
+                interaction.guild.id,
+                interaction.channel,
+                "grand_theft_auto"
+            )
+
+            blocked = await handle_universal_snitch(controller, interaction, interaction.user.id)
+
+            if not blocked:
+                await interaction.channel.send(
+                    embed=discord.Embed(
+                        title="🚨 Crime Report Filed!",
+                        description="A witness reported the vehicle theft to the police!",
+                        color=0xE74C3C
+                    )
+                )
+
+                user_items = await controller.get_user_items()
+                police_view = PoliceItemView(controller, user_items)
+
+                msg = await interaction.channel.send(
+                    embed=discord.Embed(
+                        title="🚨 Someone alerted the police!",
+                        description="⚠️ Choose your move! You have 20 seconds before the police leave the station!",
+                        color=0xE74C3C
+                    ),
+                    view=police_view
+                )
+
+                await police_view.wait_for_choice()
+
+                if not controller.police_finalized:
+                    controller.police_finalized = True
+                    await police_view.finalize_choice(interaction)
+
+            # FIX: Must use followup.send after deferring
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="🚨 You Reported the Crime",
+                    description="You snitched. -10 street cred.",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.exception("Error in ReportToPoliceButton: %s", e)
+            try:
+                await interaction.followup.send("❌ Error reporting to police.", ephemeral=True)
+            except Exception:
+                pass
+
+
+class NoSnitchButton(discord.ui.Button):
+    def __init__(self, victim: discord.Member):
+        super().__init__(label="😎 I Ain't No Snitch", style=discord.ButtonStyle.secondary)
+        self.victim = victim
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE user_stats
+                    SET street_cred = street_cred + 10
+                    WHERE discord_id = $1 AND guild_id = $2
+                """, interaction.user.id, interaction.guild.id)
+
+            embed = discord.Embed(
+                title="😎 You Stayed Quiet",
+                description="You kept your mouth shut. **+10 street cred.**",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.exception("Error in NoSnitchButton: %s", e)
+            try:
+                await interaction.response.send_message("❌ Error processing street cred.", ephemeral=True)
+            except Exception:
+                pass
+
+
+class GTAReportView(discord.ui.View):
+    def __init__(self, victim: discord.Member, criminal_id: int):
+        super().__init__(timeout=15)
+        self.victim = victim
+        self.criminal_id = criminal_id
+        self.message: discord.Message | None = None
+
+        self.add_item(ReportToPoliceButton(victim, criminal_id))
+        self.add_item(NoSnitchButton(victim))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.criminal_id:
+            await interaction.response.send_message(
+                "You cannot report your own crime.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception as e:
+            logger.exception("Error updating GTAReportView on timeout: %s", e)
+
+
+class GTAKeypadGame:
+    def __init__(self):
+        self.code = [random.randint(0, 9) for _ in range(3)]
+        self.attempts = 0
+        self.noise = 0.0
+
+    def check_guess(self, guess_str: str):
+        if len(guess_str) != 3 or not guess_str.isdigit():
+            return "invalid", None, False
+
+        self.attempts += 1
+        guess = [int(d) for d in guess_str]
+        clues = []
+
+        for i in range(3):
+            if guess[i] == self.code[i]:
+                clues.append("✅")
+            elif guess[i] in self.code:
+                clues.append("⚠️")
+            else:
+                clues.append("❌")
+
+        clues_str = " ".join(clues)
+
+        if guess == self.code:
+            return "unlocked", clues_str, False
+
+        self.noise += 20.0
+        if self.noise > 100.0:
+            self.noise = 100.0
+
+        noise_full = self.noise >= 100.0
+        return "clues", clues_str, noise_full
+
+
+async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discord.Member):
+    try:
+        view = GTAStage1View(interaction.user.id, bot, victim, interaction.channel)
+
+        embed = discord.Embed(
+            title="🚗 GTA Stage 1 — Vehicle Heist",
+            description=(
+                f"You approach **{victim.mention}**'s vehicle.\n\n"
+                "Choose how you want to proceed:\n\n"
+                "🔢 Enter Car Code\n"
+                "💥 Smash Window\n\n"
+                "Wrong guesses increase noise by 20%.\n"
+                "At 100% noise, a broadcast goes out."
+            ),
+            color=discord.Color.orange()
+        )
+
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    except Exception as e:
+        logger.exception("Error starting GTA Stage 1: %s", e)
+        try:
+            await interaction.response.send_message("❌ Error starting GTA Stage 1.", ephemeral=True)
+        except Exception:
+            pass
+
+
+class GTAStage1View(discord.ui.View):
+    def __init__(self, user_id: int, bot, victim: discord.Member, channel: discord.TextChannel):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.bot = bot
+        self.victim = victim
+        self.channel = channel
+        self.broadcast_triggered = False
+
+        self.add_item(EnterCarCodeButton(self))
+        self.add_item(SmashWindowButton(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+
+class EnterCarCodeButton(discord.ui.Button):
+    def __init__(self, parent_view: GTAStage1View):
+        super().__init__(label="🔢 Enter Car Code", style=discord.ButtonStyle.primary)
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.parent_view.user_id:
+            return await interaction.response.send_message(
+                "This isn't your break‑in.", ephemeral=True
+            )
+
+        for child in self.parent_view.children:
+            child.disabled = True
+
+        try:
+            await interaction.response.edit_message(view=self.parent_view)
+        except Exception as e:
+            logger.exception("Failed to edit ephemeral message in EnterCarCodeButton: %s", e)
+
+        try:
+            game = GTAKeypadGame()
+            keypad_view = GTAKeypadView(
+                user_id=self.parent_view.user_id,
+                bot=self.parent_view.bot,
+                victim=self.parent_view.victim,
+                channel=self.parent_view.channel,
+                game=game,
+                stage1_view=self.parent_view
+            )
+
+            embed = discord.Embed(
+                title="🔢 Vehicle Keypad",
+                description=(
+                    "Crack the **3-digit** keypad code.\n\n"
+                    "**Enter Code:** `___`\n"
+                    "**Noise Level:** 0%\n"
+                    "**Attempts:** 0\n\n"
+                    "✅ = Correct digit in the correct position\n"
+                    "⚠️ = Digit exists in the code but in a different position\n"
+                    "❌ = Digit not in the code\n"
+                ),
+                color=discord.Color.blue()
+            )
+
+            msg = await self.parent_view.channel.send(embed=embed, view=keypad_view)
+            keypad_view.status_message = msg
+
+            await interaction.followup.send(
+                "Keypad initialized. Use the number pad below to enter the code.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.exception("Error initializing keypad: %s", e)
+            try:
+                await interaction.followup.send("❌ Error initializing keypad.", ephemeral=True)
+            except Exception:
+                pass
 class SmashWindowButton(discord.ui.Button):
     def __init__(self, parent_view: GTAStage1View):
         super().__init__(label="💥 Smash Window", style=discord.ButtonStyle.danger)
@@ -271,11 +588,9 @@ class SmashWindowButton(discord.ui.Button):
                 "This isn't your break‑in.", ephemeral=True
             )
 
-        # Disable both buttons
         for child in self.parent_view.children:
             child.disabled = True
 
-        # FIXED: ephemeral message must be edited via response.edit_message()
         try:
             await interaction.response.edit_message(view=self.parent_view)
         except Exception as e:
@@ -321,10 +636,6 @@ class SmashWindowButton(discord.ui.Button):
                 pass
 
 
-# ============================================================
-# KEYPAD VIEW (NUMBER PAD + STATUS EMBED)
-# ============================================================
-
 class GTAKeypadView(discord.ui.View):
     def __init__(
         self,
@@ -348,7 +659,6 @@ class GTAKeypadView(discord.ui.View):
         self.last_clues: str | None = None
         self.broadcast_triggered: bool = stage1_view.broadcast_triggered
 
-        # Keypad layout
         self.add_item(DigitButton("1", self))
         self.add_item(DigitButton("2", self))
         self.add_item(DigitButton("3", self))
@@ -365,14 +675,13 @@ class GTAKeypadView(discord.ui.View):
         self.add_item(DigitButton("0", self))
         self.add_item(SubmitButton(self))
 
-        # Smash Window inside keypad
         self.add_item(SmashWindowDuringCodeButton(self))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
+
     async def update_status_embed(self):
         if not self.status_message:
-            logger.error("update_status_embed called with no status_message")
             return
 
         enter_code_line = "`___`"
@@ -388,9 +697,6 @@ class GTAKeypadView(discord.ui.View):
             f"**Enter Code:** {enter_code_line}\n"
             f"**Noise Level:** {noise_display}\n"
             f"**Attempts:** {self.game.attempts}\n\n"
-            "✅ = Correct digit in the correct position\n"
-            "⚠️ = Digit exists in the code but in a different position\n"
-            "❌ = Digit not in the code\n\n"
             f"Current Entry Buffer: `{self.buffer or '___'}`"
         )
 
@@ -417,7 +723,6 @@ class SmashWindowDuringCodeButton(discord.ui.Button):
                 "This isn't your break‑in.", ephemeral=True
             )
 
-        # Disable keypad buttons
         for child in self.keypad_view.children:
             child.disabled = True
 
@@ -426,7 +731,6 @@ class SmashWindowDuringCodeButton(discord.ui.Button):
         except Exception as e:
             logger.exception("Failed to disable keypad buttons: %s", e)
 
-        # Cancel keypad game
         embed = discord.Embed(
             title="💥 Smash Window",
             description=(
@@ -438,7 +742,6 @@ class SmashWindowDuringCodeButton(discord.ui.Button):
         )
         await self.keypad_view.channel.send(embed=embed)
 
-        # Start Smash Window minigame
         from .smash_window import SmashWindowView
 
         async def stage2_callback():
@@ -572,12 +875,6 @@ class SubmitButton(discord.ui.Button):
                 await interaction.followup.send("❌ Error processing keypad submission.", ephemeral=True)
             except Exception:
                 pass
-
-
-# ============================================================
-# NOISE BROADCAST
-# ============================================================
-
 async def trigger_noise_broadcast(interaction: discord.Interaction, victim: discord.Member):
     try:
         channel = interaction.channel
@@ -593,7 +890,7 @@ async def trigger_noise_broadcast(interaction: discord.Interaction, victim: disc
             color=discord.Color.red()
         )
 
-        criminal_id = interaction.user.id  # the one who caused the noise
+        criminal_id = interaction.user.id
 
         view = GTAReportView(victim, criminal_id)
         msg = await channel.send(embed=embed, view=view)
@@ -602,10 +899,6 @@ async def trigger_noise_broadcast(interaction: discord.Interaction, victim: disc
     except Exception as e:
         logger.exception("Error sending noise broadcast: %s", e)
 
-
-# ============================================================
-# STAGE 2 STUB
-# ============================================================
 
 async def start_stage2(interaction: discord.Interaction, bot, victim: discord.Member):
     try:
@@ -621,3 +914,5 @@ async def start_stage2(interaction: discord.Interaction, bot, victim: discord.Me
 
     except Exception as e:
         logger.exception("Error starting Stage 2: %s", e)
+
+

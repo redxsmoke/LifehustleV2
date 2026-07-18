@@ -19,6 +19,9 @@ rob_logger.setLevel(logging.ERROR)
 rob_cooldowns = {}
 COOLDOWN_DURATION = timedelta(minutes=30)
 
+# ✅ Import GTA Stage 1 at the top so it either works or fails loudly
+from cogs.minigames.grandtheftauto.stage1 import start_gta_stage1
+
 
 class CrimeCommands(commands.Cog):
     def __init__(self, bot):
@@ -48,14 +51,11 @@ class CrimeCommands(commands.Cog):
         guild_id = interaction.guild.id
         user_id = interaction.user.id
 
-        # ⭐ FIX: Respond IMMEDIATELY to the real interaction
-        # This prevents "This interaction failed" from appearing under Witness Decision.
         try:
             await interaction.response.defer()
         except discord.errors.InteractionResponded:
             pass
 
-        # Lazy import to avoid circular import
         from cogs.minigames.breakjob.command import start_vault_game
 
         try:
@@ -65,9 +65,6 @@ class CrimeCommands(commands.Cog):
             now = datetime.utcnow()
             next_allowed = rob_cooldowns[guild_id].get(user_id)
 
-            # ============================
-            # COOLDOWN CHECK
-            # ============================
             if next_allowed and now < next_allowed:
                 remaining = next_allowed - now
                 minutes = int(remaining.total_seconds() // 60)
@@ -84,12 +81,8 @@ class CrimeCommands(commands.Cog):
 
                 return await interaction.followup.send(embed=embed, ephemeral=True)
 
-            # Set new cooldown
             rob_cooldowns[guild_id][user_id] = now + COOLDOWN_DURATION
 
-            # ============================
-            # EMPLOYMENT CHECK
-            # ============================
             pool = get_pool()
             async with pool.acquire() as conn:
                 employed = await conn.fetchval("""
@@ -107,10 +100,6 @@ class CrimeCommands(commands.Cog):
                     color=0xFF0000
                 )
                 return await interaction.followup.send(embed=embed, ephemeral=True)
-
-            # ============================
-            # DUMMY INTERACTION SETUP
-            # ============================
 
             class DummyResponse:
                 def __init__(self, channel: discord.TextChannel):
@@ -164,38 +153,11 @@ class CrimeCommands(commands.Cog):
 
     async def handle_grand_theft_auto(self, interaction: discord.Interaction, victim: discord.Member):
         try:
-            try:
-                if await check_if_in_jail(interaction):
-                    return
-            except Exception as e:
-                gta_logger.exception("GTA jail check failed: %s", e)
-
-            try:
-                from cogs.minigames.grandtheftauto.stage1 import start_gta_stage1
-            except ModuleNotFoundError:
-                await interaction.response.send_message(
-                    f"🚗 You selected **{victim.display_name}**.\n"
-                    "Grand Theft Auto Stage 1 is not implemented yet.",
-                    ephemeral=True
-                )
-                return
-            except Exception as e:
-                gta_logger.exception("Failed to import start_gta_stage1: %s", e)
-                await interaction.response.send_message(
-                    "❌ Something went wrong starting Grand Theft Auto.",
-                    ephemeral=True
-                )
+            if await check_if_in_jail(interaction):
                 return
 
-            try:
-                await start_gta_stage1(interaction, self.bot, victim)
-            except Exception as e:
-                gta_logger.exception("Error running start_gta_stage1: %s", e)
-                await interaction.response.send_message(
-                    "❌ Something went wrong starting Grand Theft Auto.",
-                    ephemeral=True
-                )
-                return
+            # ✅ Direct call to Stage 1; no more "not implemented yet" fallback
+            await start_gta_stage1(interaction, self.bot, victim)
 
         except Exception as e:
             gta_logger.exception("Error in handle_grand_theft_auto: %s", e)

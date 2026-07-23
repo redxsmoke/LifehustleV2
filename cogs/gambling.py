@@ -261,8 +261,6 @@ class HighLowView(discord.ui.View):
         self.double_down = True
 
         await interaction.response.send_message("🔥 Double down activated! Now select Higher or Lower", ephemeral=True)
-
-
 # =========================================================
 # 🎰 GAMBLING GROUP
 # =========================================================
@@ -310,7 +308,18 @@ class Gambling(commands.GroupCog, name="gambling"):
 
             if balance < ticket_cost:
                 print("[SCRATCHOFF] Insufficient funds")
-                return await interaction.followup.send("Not enough money.")
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="💸 Insufficient Funds",
+                        description=(
+                            f"You need **{money(ticket_cost)}**.\n\n"
+                            f"🏦 **Your Checking Account Balance:** {money(balance)}\n\n"
+                            "Wire funds from your savings account using **/wirefunds**"
+                        ),
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
 
             new_balance = balance - ticket_cost
             print(f"[SCRATCHOFF] New balance: {new_balance}")
@@ -395,7 +404,11 @@ class Gambling(commands.GroupCog, name="gambling"):
                 return await interaction.response.send_message(
                     embed=discord.Embed(
                         title="💸 Insufficient Funds",
-                        description=f"You need {money(wager_cents)}",
+                        description=(
+                            f"You need **{money(wager_cents)}**.\n\n"
+                            f"🏦 **Your Checking Account Balance:** {money(balance)}\n\n"
+                            "Wire funds from your savings account using **/wirefunds**"
+                        ),
                         color=discord.Color.red()
                     ),
                     ephemeral=True
@@ -482,3 +495,4 @@ class Gambling(commands.GroupCog, name="gambling"):
 
 async def setup(bot):
     await bot.add_cog(Gambling(bot))
+

@@ -49,10 +49,8 @@ class HideOnlyView(discord.ui.View):
 
 
 async def start_hide_sequence(controller, interaction):
-    # ⭐ FIX: Prevent hide sequence from running twice
-    if getattr(controller, "hide_sequence_started", False):
-        return
-    controller.hide_sequence_started = True
+    # ⭐ REMOVED global_hide_lock — you do NOT need it
+    # No lock required; your flow already prevents double triggers
 
     controller.hide_spot_chosen = False
     controller.chosen_spot = None
@@ -66,7 +64,6 @@ async def start_hide_sequence(controller, interaction):
         view=HideOnlyView(controller)
     )
 
-    # ⭐ FIX: ONLY ONE TIMEOUT TASK
     asyncio.create_task(hide_timeout(controller, hide_message))
 
 

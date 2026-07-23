@@ -7,6 +7,9 @@ from db.connection import get_pool
 from police.police_reported_logic.police_flow_controller import PoliceFlowController
 from police.police_reported_logic.universal_snitch_system import start_snitch_flow
 
+# ⭐ NEW: Import Stage 2 Hotwire
+from cogs.minigames.grandtheftauto.stage2_hotwire import start_gta_stage2
+
 logger = logging.getLogger("crime.gta.stage1")
 logger.setLevel(logging.DEBUG)
 
@@ -178,15 +181,11 @@ class SmashWindowButton(discord.ui.Button):
         try:
             from .smash_window import SmashWindowView
 
-            # ⭐ FIX: Stage 2 is now handled ONLY inside SmashWindowView
-            async def stage2_callback():
-                logger.debug("[stage2_callback] Stage 2 suppressed (handled by SmashWindowView)")
-                return
-
+            # ⭐ Stage 2 now handled inside SmashWindowView
             view = SmashWindowView(
                 user_id=self.parent_view.user_id,
                 victim=self.parent_view.victim,
-                stage2_callback=stage2_callback
+                bot=self.parent_view.bot
             )
 
             embed = discord.Embed(
@@ -324,15 +323,10 @@ class SmashWindowDuringCodeButton(discord.ui.Button):
 
         from .smash_window import SmashWindowView
 
-        # ⭐ FIX: Stage 2 suppressed here too
-        async def stage2_callback():
-            logger.debug("[stage2_callback keypad] Stage 2 suppressed")
-            return
-
         view = SmashWindowView(
             user_id=self.keypad_view.user_id,
             victim=self.keypad_view.victim,
-            stage2_callback=stage2_callback
+            bot=self.keypad_view.bot
         )
 
         msg = await self.keypad_view.channel.send(view=view)
@@ -444,8 +438,12 @@ class SubmitButton(discord.ui.Button):
                 )
                 await self.keypad_view.channel.send(embed=embed)
 
-                # ⭐ FIX: Stage 2 suppressed here too
-                logger.debug("[SubmitButton] Stage 2 suppressed (handled by SmashWindowView)")
+                # ⭐ CALL STAGE 2 HOTWIRE
+                await start_gta_stage2(
+                    interaction,
+                    self.keypad_view.bot,
+                    self.keypad_view.victim
+                )
                 return
 
             if noise_full and not self.keypad_view.broadcast_triggered:

@@ -183,9 +183,6 @@ class ContributeModal(discord.ui.Modal, title="Contribute to Go Free Me"):
                 WHERE discord_id = $2 AND guild_id = $3
             """, new_bail_paid, self.target_user_id, self.guild_id)
 
-            # ============================================================
-            # AUTO-RELEASE + CRIMINAL RECORD WIPE
-            # ============================================================
             if new_bail_paid >= bail_total:
 
                 await conn.execute("""
@@ -194,7 +191,6 @@ class ContributeModal(discord.ui.Modal, title="Contribute to Go Free Me"):
                     WHERE discord_id = $1 AND guild_id = $2
                 """, self.target_user_id, self.guild_id)
 
-                # DELETE bail record instead of resetting it
                 await conn.execute("""
                     DELETE FROM user_bail
                     WHERE discord_id = $1 AND guild_id = $2
@@ -222,7 +218,8 @@ class ContributeModal(discord.ui.Modal, title="Contribute to Go Free Me"):
         )
 
         await interaction.response.send_message(
-            f"Donation received! New balance: ${(checking - contribution_cents)/100:,.2f}",
+            f"You used money from your **checking account** to contribute.\n"
+            f"Your updated checking balance is **${(checking - contribution_cents)/100:,.2f}**.",
             ephemeral=True
         )
 
@@ -301,13 +298,18 @@ class BribeDAButton(discord.ui.Button):
 
         remaining = self.bail_amount
 
+        original_checking = checking
+        original_savings = savings
+
         if checking >= remaining:
             checking -= remaining
             remaining = 0
+            account_used = "checking account"
         else:
             remaining -= checking
             checking = 0
             savings -= remaining
+            account_used = "savings account"
 
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -324,18 +326,21 @@ class BribeDAButton(discord.ui.Button):
                 WHERE discord_id = $1 AND guild_id = $2
             """, interaction.user.id, interaction.guild.id)
 
-            # DELETE bail record instead of resetting it
             await conn.execute("""
                 DELETE FROM user_bail
                 WHERE discord_id = $1 AND guild_id = $2
             """, interaction.user.id, interaction.guild.id)
 
+        # ⭐ UPDATED — DA bribe now clearly shows bail payment
         await interaction.response.send_message(
             embed=discord.Embed(
-                title="✅ DA Bribed Successfully",
+                title="💵 DA Bribed Successfully",
                 description=(
-                    "For the right amount, the District Attorney made all of this go away.\n\n"
-                    "Your record has been wiped and you're free again."
+                    f"You used money from your **{account_used}** to pay off the DA.\n\n"
+                    f"**Updated Balances:**\n"
+                    f"•💰 Checking: ${checking/100:,.2f}\n"
+                    f"•🏛️ Savings: ${savings/100:,.2f}\n\n"
+                    "You're free again — stay out of trouble."
                 ),
                 color=discord.Color.green()
             ),

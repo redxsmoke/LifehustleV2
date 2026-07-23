@@ -9,6 +9,9 @@ from db.connection import get_pool
 from police.police_reported_logic.police_flow_controller import PoliceFlowController
 from police.police_reported_logic.intimidation_engine import process_snitch as handle_universal_snitch
 from police.police_reported_logic.police_items import PoliceItemView
+from police.police_reported_logic.universal_snitch_system import UniversalSnitchView
+from police.police_reported_logic.universal_snitch_system import CRIME_TEXT
+
 
 from .engine import VaultGame   
 
@@ -17,6 +20,10 @@ COLOR_PRIMARY = 0x5865F2
 logger = logging.getLogger("crime.breakjob")
 logger.setLevel(logging.ERROR)
 
+
+# ============================================================
+# VAULT GUESS MODAL
+# ============================================================
 
 class VaultGuessModal(discord.ui.Modal):
     def __init__(self, view: "VaultGameView"):
@@ -58,7 +65,6 @@ class VaultGuessModal(discord.ui.Modal):
                 )
 
                 self.view.controller.stolen_amount = cash
-                
                 self.view.stop()
                 return
 
@@ -79,7 +85,7 @@ class VaultGuessModal(discord.ui.Modal):
                 msg = await self.view.channel.send(
                     embed=discord.Embed(
                         title="🚨 The vault autolocked and alerted the Police!",
-                        description="⚠️ Choose your move! You have 20 seconds before the police leave the station!:",
+                        description="⚠️ Choose your move! You have 20 seconds before the police leave the station!",
                         color=0xE74C3C
                     ),
                     view=police_view
@@ -98,14 +104,13 @@ class VaultGuessModal(discord.ui.Modal):
                     await asyncio.sleep(3)
 
                 await police_view.finalize_choice(interaction)
-
                 self.view.stop()
                 return
 
             else:
                 await self.view.channel.send(result)
 
-        except Exception as e:
+        except Exception:
             logger.exception("VaultGuessModal.on_submit crashed")
             try:
                 await interaction.followup.send(
@@ -115,6 +120,10 @@ class VaultGuessModal(discord.ui.Modal):
             except Exception:
                 pass
 
+
+# ============================================================
+# VAULT GAME VIEW (Universal Snitch System)
+# ============================================================
 
 class VaultGameView(discord.ui.View):
     def __init__(self, user_id, bot, channel, guild_id):
@@ -127,6 +136,7 @@ class VaultGameView(discord.ui.View):
         self.game = VaultGame()
         self.outcome = None
 
+        # Universal snitch controller
         self.controller = PoliceFlowController(
             user_id=self.user_id,
             guild_id=self.guild_id,
@@ -136,31 +146,34 @@ class VaultGameView(discord.ui.View):
             company_name=None,
         )
 
+        # Vault still uses these flags
         self.snitch_disabled = False
         self.has_snitched = False
 
-        # Track who clicked what
+        # Track witness votes
         self.snitchers = set()
         self.no_snitchers = set()
 
-        # Send snitch buttons in separate message
+        # Send universal snitch buttons
         asyncio.create_task(self.send_snitch_buttons())
 
     async def send_snitch_buttons(self):
-        view = SnitchDecisionView(self)
+        view = UniversalSnitchView(
+            controller=self.controller,
+            channel=self.channel,
+            crime_owner_id=self.user_id,
+            lockout_target=self
+        )
+
         msg = await self.channel.send(
             embed=discord.Embed(
-                title="👀 Witness Decision",
-                description=(
-                    "Someone is cracking a vault!\n\n"
-                    "Will you snitch or stay quiet?\n\n"
-                    "😎 I Ain't No Snitch → **+10 street cred**\n"
-                    "🚨 Snitch → **-10 street cred**"
-                ),
+                title=CRIME_TEXT["vault"]["witness_title"],
+                description=CRIME_TEXT["vault"]["witness_description"],
                 color=discord.Color.orange()
             ),
             view=view
         )
+
         view.message = msg
 
     async def apply_success_rewards(self, interaction):
@@ -232,176 +245,3 @@ class VaultGameView(discord.ui.View):
                     )
             except Exception:
                 pass
-
-
-# ============================================================
-# SNITCH DECISION VIEW (separate message)
-# ============================================================
-
-class SnitchDecisionView(discord.ui.View):
-    def __init__(self, parent_view: VaultGameView):
-        super().__init__(timeout=120)
-        self.parent_view = parent_view
-        self.message: discord.Message | None = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # ⭐ FIX: Allow crook to click (prevents "interaction failed")
-        return True
-
-    @discord.ui.button(label="😎 I Ain't No Snitch", style=discord.ButtonStyle.secondary)
-    async def no_snitch(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            user_id = interaction.user.id
-
-            # ⭐ CROOK LOGIC — crook gets EMBED insult + cannot vote
-            if user_id == self.parent_view.user_id:
-                return await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="🚫 Nice Try",
-                        description="Do you need a reminder not to snitch on yourself? A Real Einstein you are.",
-                        color=discord.Color.red()
-                    ),
-                    ephemeral=True
-                )
-
-            # ⭐ Witness logic
-            await interaction.response.defer()
-
-            # User already chose
-            if user_id in self.parent_view.no_snitchers or user_id in self.parent_view.snitchers:
-                return await interaction.followup.send(
-                    embed=discord.Embed(
-                        title="⚠️ Already Voted",
-                        description="You've already made your choice.",
-                        color=discord.Color.orange()
-                    ),
-                    ephemeral=True
-                )
-
-            self.parent_view.no_snitchers.add(user_id)
-
-            pool = get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO user_stats (discord_id, guild_id, street_cred)
-                    VALUES ($1, $2, 10)
-                    ON CONFLICT (discord_id, guild_id)
-                    DO UPDATE SET street_cred = LEAST(250, COALESCE(user_stats.street_cred, 0) + 10),
-                                  last_updated = NOW();
-                """, user_id, interaction.guild.id)
-
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="😎 You Stayed Quiet",
-                    description="You kept your mouth shut. **+10 street cred.**",
-                    color=discord.Color.green()
-                ),
-                ephemeral=True
-            )
-
-            # Disable only for THIS user
-            button.disabled = True
-            await self.message.edit(view=self)
-
-        except Exception:
-            logger.exception("NoSnitch crashed")
-
-    @discord.ui.button(label="🚨 Snitch", style=discord.ButtonStyle.red)
-    async def snitch(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            user_id = interaction.user.id
-
-            # ⭐ CROOK LOGIC — crook gets EMBED insult + cannot snitch
-            if user_id == self.parent_view.user_id:
-                return await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="🚫 Absolutely Not",
-                        description="Are you the dumbest criminal alive?",
-                        color=discord.Color.red()
-                    ),
-                    ephemeral=True
-                )
-
-            # ⭐ Witness logic
-            await interaction.response.defer()
-
-            # User already chose
-            if user_id in self.parent_view.no_snitchers or user_id in self.parent_view.snitchers:
-                return await interaction.followup.send(
-                    embed=discord.Embed(
-                        title="⚠️ Already Voted",
-                        description="You've already made your choice.",
-                        color=discord.Color.orange()
-                    ),
-                    ephemeral=True
-                )
-
-            self.parent_view.snitchers.add(user_id)
-            self.parent_view.has_snitched = True
-            self.parent_view.snitch_disabled = True
-
-            # Street cred penalty
-            pool = get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO user_stats (discord_id, guild_id, street_cred)
-                    VALUES ($1, $2, -10)
-                    ON CONFLICT (discord_id, guild_id)
-                    DO UPDATE SET street_cred = GREATEST(-250, COALESCE(user_stats.street_cred, 0) - 10),
-                                  last_updated = NOW();
-                """, user_id, interaction.guild.id)
-
-            # Disable BOTH buttons for EVERYONE
-            for child in self.children:
-                child.disabled = True
-
-            await self.message.edit(view=self)
-
-            # Intimidation engine
-            blocked = await handle_universal_snitch(
-                self.parent_view.controller,
-                interaction,
-                user_id
-            )
-
-            if blocked:
-                return
-
-            # Police alert
-            await self.parent_view.channel.send(
-                embed=discord.Embed(
-                    title="🚨 Crime Report Filed!",
-                    description="A witness reported the vault robbery to the police!",
-                    color=0xE74C3C
-                )
-            )
-
-            user_items = await self.parent_view.controller.get_user_items()
-            police_view = PoliceItemView(self.parent_view.controller, user_items)
-
-            msg = await self.parent_view.channel.send(
-                embed=discord.Embed(
-                    title="🚨 Someone alerted the police!",
-                    description="⚠️ Choose your move! You have 20 seconds before the police leave the station!:",
-                    color=0xE74C3C
-                ),
-                view=police_view
-            )
-
-            await police_view.wait_for_choice()
-            await police_view.finalize_choice(interaction)
-
-        except Exception:
-            logger.exception("Snitch crashed")
-
-    async def on_timeout(self):
-        try:
-            for child in self.children:
-                child.disabled = True
-            if self.message:
-                await self.message.edit(view=self)
-        except Exception:
-            logger.exception("SnitchDecisionView timeout crashed")
-
-
-

@@ -6,25 +6,25 @@ import logging
 from police.police_reported_logic.police_flow_controller import PoliceFlowController
 from police.police_reported_logic.universal_snitch_system import start_snitch_flow
 
+from cogs.minigames.grandtheftauto.stage2_hotwire import start_gta_stage2
+
 logger = logging.getLogger("crime.gta.smashwindow")
 logger.setLevel(logging.DEBUG)
 
 
 class SmashWindowView(discord.ui.View):
-    def __init__(self, user_id: int, victim: discord.Member, stage2_callback):
+    def __init__(self, user_id: int, victim: discord.Member, bot):
         super().__init__(timeout=10)
         self.user_id = user_id
         self.victim = victim
-        self.stage2_callback = stage2_callback
+        self.bot = bot
 
         self.message: discord.Message | None = None
         self.ready_to_smash = False
         self.smashed = False
-
-        # ⭐ Prevent duplicate loud breaks
         self.loud_break_triggered = False
 
-        self.add_item(SmashButton(self))
+        self.smash_button = SmashButton(self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
@@ -33,7 +33,7 @@ class SmashWindowView(discord.ui.View):
         self.message = message
 
         try:
-            # Intro embed
+            # Initial phase: no button shown
             embed = discord.Embed(
                 title="💥 Window Breach Sequence",
                 description=(
@@ -43,29 +43,31 @@ class SmashWindowView(discord.ui.View):
                 ),
                 color=discord.Color.orange()
             )
-            await message.edit(embed=embed)
+            await message.edit(embed=embed, view=None)
 
-            # Suspense delay
+            # Prime window timing (unchanged)
             await asyncio.sleep(random.uniform(1.5, 3.5))
 
-            # Quiet smash window opens
             self.ready_to_smash = True
+
+            # Show smash button ONLY during prime window
+            self.clear_items()
+            self.add_item(self.smash_button)
 
             embed = discord.Embed(
                 title="💥 Silent Opportunity",
                 description=(
                     "**This is your moment.**\n"
                     "Break the window *quietly*.\n\n"
-                    "Tap the button **immediately** to keep the noise down."
+                    "Tap the button immediately to keep the noise down."
                 ),
                 color=discord.Color.green()
             )
             await message.edit(embed=embed, view=self)
 
-            # Reaction window
-            await asyncio.sleep(0.6)
+            # Prime window duration (unchanged)
+            await asyncio.sleep(1.5)
 
-            # ⭐ Loud break only once
             if not self.smashed and not self.loud_break_triggered:
                 self.loud_break_triggered = True
                 await self.handle_loud_break()
@@ -88,7 +90,17 @@ class SmashWindowView(discord.ui.View):
             if self.message:
                 await self.message.edit(embed=embed, view=None)
 
-            await self.stage2_callback()
+            for child in self.children:
+                child.disabled = True
+
+            self.stop()
+
+            await start_gta_stage2(
+                self.message.channel,
+                self.bot,
+                self.victim,
+                self.user_id
+            )
 
         except Exception as e:
             logger.exception(f"[handle_quiet_break] ERROR: {e}")
@@ -96,11 +108,11 @@ class SmashWindowView(discord.ui.View):
     async def handle_loud_break(self):
         try:
             embed = discord.Embed(
-                title="🔊 Noise Detected",
+                title="🔊 Car Alarm Activated",
                 description=(
                     "Your timing was off.\n"
-                    "The window shattered loudly — the neighborhood heard it.\n\n"
-                    "Alerting witnesses..."
+                    "The window shattered loudly and it set off the car alarm.\n\n"
+                    "The game has ended.."
                 ),
                 color=discord.Color.red()
             )
@@ -108,20 +120,22 @@ class SmashWindowView(discord.ui.View):
             if self.message:
                 await self.message.edit(embed=embed, view=None)
 
+            for child in self.children:
+                child.disabled = True
+
+            self.stop()
+
             await trigger_noise_broadcast(
                 self.message.channel,
                 self.victim,
                 self.user_id
             )
 
-            await self.stage2_callback()
-
         except Exception as e:
             logger.exception(f"[handle_loud_break] ERROR: {e}")
 
     async def on_timeout(self):
         try:
-            # ⭐ Prevent timeout from triggering loud break twice
             if not self.smashed and not self.loud_break_triggered:
                 self.loud_break_triggered = True
                 await self.handle_loud_break()
@@ -141,10 +155,12 @@ class SmashButton(discord.ui.Button):
                     "This isn't your break‑in.", ephemeral=True
                 )
 
+            for child in self.parent_view.children:
+                child.disabled = True
+
             await interaction.response.defer()
             self.parent_view.smashed = True
 
-            # Quiet or loud break — but loud break only once
             if self.parent_view.ready_to_smash:
                 await self.parent_view.handle_quiet_break()
             else:

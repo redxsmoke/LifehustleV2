@@ -4,7 +4,6 @@ from discord.ext import commands
 
 from police.views_daily_report import DailyCrimeReportView
 
-
 class DailyReportCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -29,8 +28,14 @@ class DailyReportCommands(commands.Cog):
         crimes = scheduler.daily_crimes.get(interaction.guild.id)
 
         if not crimes:
+            embed = discord.Embed(
+                title="🚓Daily Police Report",
+                description="📡 No crimes selected for today yet.",
+                color=discord.Color.orange()
+            )
+
             return await interaction.response.send_message(
-                "No crimes selected for today yet.",
+                embed=embed,
                 ephemeral=True
             )
 

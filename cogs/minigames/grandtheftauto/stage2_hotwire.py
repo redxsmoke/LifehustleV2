@@ -3,8 +3,12 @@ import asyncio
 import random
 import logging
 
+# ⭐ CORRECT PATH (matches your filesystem)
 from police.police_reported_logic.police_flow_controller import PoliceFlowController
 from police.police_reported_logic.universal_snitch_system import start_snitch_flow
+
+# ⭐ Stage 3 import stays the same
+from cogs.minigames.grandtheftauto.stage3_escape import start_stage3_directional_memory
 
 logger = logging.getLogger("crime.gta.stage2")
 logger.setLevel(logging.DEBUG)
@@ -20,7 +24,7 @@ WIRE_EMOJIS = {
 WIRE_COLORS = list(WIRE_EMOJIS.keys())
 
 
-async def start_gta_stage2(channel, bot, victim, user_id):
+async def start_gta_stage2(channel, bot, victim, user_id, car_id):
     try:
         controller = PoliceFlowController(
             user_id=user_id,
@@ -36,6 +40,7 @@ async def start_gta_stage2(channel, bot, victim, user_id):
             bot=bot,
             victim=victim,
             controller=controller,
+            car_id=car_id,
         )
 
         embed = discord.Embed(
@@ -59,12 +64,13 @@ async def start_gta_stage2(channel, bot, victim, user_id):
 
 
 class WiringPuzzleView(discord.ui.View):
-    def __init__(self, user_id, bot, victim, controller):
+    def __init__(self, user_id, bot, victim, controller, car_id):
         super().__init__(timeout=60)
         self.user_id = user_id
         self.bot = bot
         self.victim = victim
         self.controller = controller
+        self.car_id = car_id
 
         self.status_message = None
         self.correct_order = random.sample(WIRE_COLORS, len(WIRE_COLORS))
@@ -181,7 +187,6 @@ class WiringPuzzleView(discord.ui.View):
         self.selected_spaces = None
 
         self.moves_left -= 1
-
         self.noise += 20
 
         if self.noise >= 100:
@@ -206,7 +211,7 @@ class WiringPuzzleView(discord.ui.View):
             description=(
                 "You aligned the wiring perfectly.\n"
                 "The engine roars to life.\n\n"
-                "Time to hide before the police arrive!"
+                "**Stage 3: Escape Route Memory Challenge begins now.**"
             ),
             color=discord.Color.green(),
         )
@@ -217,7 +222,15 @@ class WiringPuzzleView(discord.ui.View):
             self.timer_task.cancel()
 
         self.stop()
-        await self.controller.start_hide(None)
+
+        # ⭐ Stage 3 call (unchanged)
+        await start_stage3_directional_memory(
+            channel=self.controller.channel,
+            user=self.controller.channel.guild.get_member(self.user_id),
+            guild_id=self.controller.guild_id,
+            car_id=self.car_id,
+            controller=self.controller,
+        )
 
     async def fail(self, reason):
         self.finished = True

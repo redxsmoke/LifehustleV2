@@ -19,7 +19,11 @@ rob_logger.setLevel(logging.ERROR)
 rob_cooldowns = {}
 COOLDOWN_DURATION = timedelta(minutes=30)
 
-# ✅ Import GTA Stage 1 at the top so it either works or fails loudly
+# GTA cooldowns
+gta_cooldowns = {}
+GTA_COOLDOWN_DURATION = timedelta(minutes=30)
+
+# Import GTA Stage 1
 from cogs.minigames.grandtheftauto.stage1 import start_gta_stage1
 
 
@@ -156,7 +160,76 @@ class CrimeCommands(commands.Cog):
             if await check_if_in_jail(interaction):
                 return
 
-            # ✅ Direct call to Stage 1; no more "not implemented yet" fallback
+            guild_id = interaction.guild.id
+            thief_id = interaction.user.id
+
+            # ============================
+            # 🚗 GTA COOLDOWN (funny)
+            # ============================
+            if guild_id not in gta_cooldowns:
+                gta_cooldowns[guild_id] = {}
+
+            now = datetime.utcnow()
+            next_allowed = gta_cooldowns[guild_id].get(thief_id)
+
+            if next_allowed and now < next_allowed:
+                remaining = next_allowed - now
+                minutes = int(remaining.total_seconds() // 60)
+                seconds = int(remaining.total_seconds() % 60)
+
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="⏳ Whoa there, *Speed Racer!*",
+                        description=(
+                            "Your criminal engine is overheating.\n\n"
+                            f"Try stealing another car in **{minutes}m {seconds}s**.\n"
+                            "Let the cops finish their paperwork first."
+                        ),
+                        color=discord.Color.orange()
+                    ),
+                    ephemeral=True
+                )
+
+            gta_cooldowns[guild_id][thief_id] = now + GTA_COOLDOWN_DURATION
+
+            # ============================
+            # 🚫 Prevent repeated thefts (funny victim block)
+            # ============================
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                stolen_recently = await conn.fetchrow("""
+                    SELECT last_stolen_at,
+                           (last_stolen_at + INTERVAL '12 hours') - NOW() AS remaining
+                    FROM user_vehicles
+                    WHERE guild_id = $1
+                      AND stolen_from_discord_id = $2
+                      AND is_stolen = TRUE
+                      AND last_stolen_at >= NOW() - INTERVAL '12 hours'
+                    ORDER BY last_stolen_at DESC
+                    LIMIT 1
+                """, interaction.guild.id, victim.id)
+
+            if stolen_recently:
+                remaining = stolen_recently["remaining"]
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="🚗 Slow down there, *Dominic Toretto!*",
+                        description=(
+                            f"**{victim.display_name}** is already filing enough insurance claims.\n\n"
+                            f"You can't steal from them again for **{hours}h {minutes}m**.\n"
+                            "Let their poor deductible breathe."
+                        ),
+                        color=discord.Color.orange()
+                    ),
+                    ephemeral=True
+                )
+
+            # ============================
+            # Continue to GTA Stage 1
+            # ============================
             await start_gta_stage1(interaction, self.bot, victim)
 
         except Exception as e:

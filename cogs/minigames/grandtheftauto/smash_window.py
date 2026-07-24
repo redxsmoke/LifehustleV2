@@ -13,11 +13,12 @@ logger.setLevel(logging.DEBUG)
 
 
 class SmashWindowView(discord.ui.View):
-    def __init__(self, user_id: int, victim: discord.Member, bot):
+    def __init__(self, user_id: int, victim: discord.Member, bot, car_id: int):
         super().__init__(timeout=10)
         self.user_id = user_id
         self.victim = victim
         self.bot = bot
+        self.car_id = car_id   # ⭐ REQUIRED
 
         self.message: discord.Message | None = None
         self.ready_to_smash = False
@@ -33,7 +34,6 @@ class SmashWindowView(discord.ui.View):
         self.message = message
 
         try:
-            # Initial phase: no button shown
             embed = discord.Embed(
                 title="💥 Window Breach Sequence",
                 description=(
@@ -45,12 +45,10 @@ class SmashWindowView(discord.ui.View):
             )
             await message.edit(embed=embed, view=None)
 
-            # Prime window timing (unchanged)
             await asyncio.sleep(random.uniform(1.5, 3.5))
 
             self.ready_to_smash = True
 
-            # Show smash button ONLY during prime window
             self.clear_items()
             self.add_item(self.smash_button)
 
@@ -65,7 +63,6 @@ class SmashWindowView(discord.ui.View):
             )
             await message.edit(embed=embed, view=self)
 
-            # Prime window duration (unchanged)
             await asyncio.sleep(1.5)
 
             if not self.smashed and not self.loud_break_triggered:
@@ -99,7 +96,8 @@ class SmashWindowView(discord.ui.View):
                 self.message.channel,
                 self.bot,
                 self.victim,
-                self.user_id
+                self.user_id,
+                self.car_id   # ⭐ REQUIRED
             )
 
         except Exception as e:

@@ -1,5 +1,6 @@
 import discord
 import random
+import asyncio
 from datetime import datetime
 
 from db.connection import get_pool
@@ -224,6 +225,8 @@ class LocationButton(discord.ui.Button):
                            uv.license_plate,
                            uv.breakdown_reason,
                            uv.breakdown_cost,
+                           uv.is_stolen,
+                           uv.last_stolen_at,
                            cv.vehicle_type
                     FROM user_vehicles uv
                     JOIN cd_vehicles cv ON cv.cd_vehicle_id = uv.cd_vehicle_id
@@ -371,6 +374,24 @@ class LocationButton(discord.ui.Button):
                 L("Minigame failed")
                 forced_outcome_type = "negative"
                 extra_penalty_cents = view.extra_penalty_cents
+
+            # ⭐ stolen vehicle broadcast AFTER minigame with 5-second delay
+            if vehicle and vehicle["is_stolen"]:
+                await asyncio.sleep(5)
+
+                broadcast = discord.Embed(
+                    title="🚨 Stolen Vehicle Spotted!",
+                    description=(
+                        f"A stolen vehicle has been spotted traveling!\n\n"
+                        f"**Vehicle:** {vehicle['vehicle_type']}\n"
+                        f"**Color:** {vehicle['color']}\n"
+                        f"**Plate:** {vehicle['license_plate']}\n"
+                        f"**Stolen On:** {vehicle['last_stolen_at']}"
+                    ),
+                    color=discord.Color.orange()
+                )
+
+                await interaction.channel.send(embed=broadcast)
 
         # =========================
         # ECONOMY + TRAVEL EVENT

@@ -65,7 +65,7 @@ class VehicleButton(discord.ui.Button):
             # USER (SERVER SCOPED)
             # =========================
             user = await conn.fetchrow("""
-                SELECT cd_location_id, checking_account_balance
+                SELECT cd_location_id, checking_account_balance, max_vehicles_allowed
                 FROM users
                 WHERE discord_id = $1
                   AND guild_id = $2
@@ -104,11 +104,16 @@ class VehicleButton(discord.ui.Button):
                   AND guild_id = $2
             """, interaction.user.id, interaction.guild.id)
 
-            if owned_count >= 3:
+            # =========================
+            # ⭐ UPDATED: dynamic max vehicle limit
+            # =========================
+            max_allowed = user["max_vehicles_allowed"]
+
+            if owned_count >= max_allowed:
                 return await interaction.response.send_message(
                     embed=discord.Embed(
                         title="🚫 Garage Full",
-                        description="You already own **3 vehicles**.",
+                        description=f"You already own **{owned_count} vehicles**, and your limit is **{max_allowed}**.",
                         color=discord.Color.orange()
                     ),
                     ephemeral=True

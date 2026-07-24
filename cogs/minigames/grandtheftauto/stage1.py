@@ -52,7 +52,22 @@ class GTAKeypadGame:
 async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discord.Member):
     try:
         logger.debug("[start_gta_stage1] Initializing Stage 1 view")
-        view = GTAStage1View(interaction.user.id, bot, victim, interaction.channel)
+
+        # ⭐ FETCH CAR ID
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            car_id = await conn.fetchval(
+                """
+                SELECT user_vehicle_id
+                FROM user_vehicles
+                WHERE discord_id = $1 AND guild_id = $2
+                """,
+                victim.id,
+                interaction.guild.id
+            )
+
+        # ⭐ PASS car_id INTO VIEW
+        view = GTAStage1View(interaction.user.id, bot, victim, interaction.channel, car_id)
 
         embed = discord.Embed(
             title="🚗 GTA Stage 1 — Vehicle Heist",
@@ -78,13 +93,14 @@ async def start_gta_stage1(interaction: discord.Interaction, bot, victim: discor
 
 
 class GTAStage1View(discord.ui.View):
-    def __init__(self, user_id: int, bot, victim: discord.Member, channel: discord.TextChannel):
+    def __init__(self, user_id: int, bot, victim: discord.Member, channel: discord.TextChannel, car_id: int):
         super().__init__(timeout=300)
         logger.debug(f"[GTAStage1View.__init__] Stage1View created for user {user_id}, victim {victim.id}")
         self.user_id = user_id
         self.bot = bot
         self.victim = victim
         self.channel = channel
+        self.car_id = car_id   # ⭐ REQUIRED
         self.broadcast_triggered = False
 
         self.add_item(EnterCarCodeButton(self))
@@ -181,11 +197,12 @@ class SmashWindowButton(discord.ui.Button):
         try:
             from .smash_window import SmashWindowView
 
-            # ⭐ Stage 2 now handled inside SmashWindowView
+            # ⭐ PASS car_id
             view = SmashWindowView(
                 user_id=self.parent_view.user_id,
                 victim=self.parent_view.victim,
-                bot=self.parent_view.bot
+                bot=self.parent_view.bot,
+                car_id=self.parent_view.car_id
             )
 
             embed = discord.Embed(
@@ -323,10 +340,12 @@ class SmashWindowDuringCodeButton(discord.ui.Button):
 
         from .smash_window import SmashWindowView
 
+        # ⭐ PASS car_id
         view = SmashWindowView(
             user_id=self.keypad_view.user_id,
             victim=self.keypad_view.victim,
-            bot=self.keypad_view.bot
+            bot=self.keypad_view.bot,
+            car_id=self.keypad_view.stage1_view.car_id
         )
 
         msg = await self.keypad_view.channel.send(view=view)
@@ -438,11 +457,13 @@ class SubmitButton(discord.ui.Button):
                 )
                 await self.keypad_view.channel.send(embed=embed)
 
-                # ⭐ CALL STAGE 2 HOTWIRE
+                # ⭐ CALL STAGE 2 HOTWIRE WITH car_id
                 await start_gta_stage2(
                     interaction,
                     self.keypad_view.bot,
-                    self.keypad_view.victim
+                    self.keypad_view.victim,
+                    self.user_id,
+                    self.keypad_view.stage1_view.car_id
                 )
                 return
 
